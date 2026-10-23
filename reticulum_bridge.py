@@ -149,21 +149,23 @@ class PresenceHandler:
 RNS.Transport.register_announce_handler(PresenceHandler())
 
 
-def announce_presence() -> None:
-    """Ask the node what it is willing to say, then say exactly that — or nothing."""
+def announce_presence() -> bool:
+    """Ask the node what it is willing to say, then say exactly that — or nothing. False when the node did not
+    answer, so the loop asks again soon instead of in RETICULUM_ANNOUNCE_S."""
     global announcing
     try:
         p = httpx.get(f"{API}/presence", timeout=5).json()
     except Exception as e:                                  # noqa: BLE001
         log.debug("presence: the node did not answer (%s)", e)
-        return
+        return False
     if not p.get("enabled"):
         announcing = False
-        return
+        return True
     body = {k: p.get(k) for k in ("node", "cell", "res", "version", "kind") if p.get(k) is not None}
     PRESENCE.announce(app_data=json.dumps(body, separators=(",", ":")).encode())
     announcing = True
     log.info("presence: announced %s", body)
+    return True
 
 
 def on_message(message):
@@ -240,7 +242,12 @@ def announce_loop():
     while True:
         try:
             router.announce(me.hash)                        # the LXMF address, so a person can message it
-            announce_presence()                             # and, if the node allows it, that it exists
+            # and, if the node allows it, that it exists. `planetai update` starts the app with this container, so the
+            # first ask often finds no node yet: ask again every 30 s for a few minutes, not once per half hour.
+            for _ in range(10):
+                if announce_presence():
+                    break
+                time.sleep(30)
         except Exception as e:                              # noqa: BLE001 — one bad announce is not the end
             log.warning("announce failed: %s", e)
         time.sleep(ANNOUNCE_S)

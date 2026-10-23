@@ -90,5 +90,36 @@ ENV = {"LOG_LEVEL", "NODE_NAME", "NODE_API_URL", "RETICULUM_CONFIGDIR", "RETICUL
 read = set(re.findall(r"getenv\(['\"]([A-Z_]+)['\"]", src))
 chk(f"reads exactly the eight compose passes it (extra: {sorted(read - ENV)}, unread: {sorted(ENV - read)})", read == ENV)
 
+# A node that is still starting must not cost half an hour of silence. `planetai update` restarts the app and this
+# container together; the first GET /presence found no node, announce_presence gave up, and the loop slept
+# RETICULUM_ANNOUNCE_S. Seen on node #1 on 23 Oct 2026 at 12:54 UTC. The real two functions run here against a node
+# that answers on the third ask; the loop's long sleep ends the test.
+lift = lambda a, b: src[src.index(a):src.index(b, src.index(a))]
+block = lift("def announce_presence", "\n\ndef on_message") + "\n\n" + lift("def announce_loop", "\n\nthreading.Thread")
+
+class Stop(BaseException): pass
+asks, sleeps, said = [], [], []
+def get(url, timeout):
+    asks.append(url)
+    if len(asks) < 3:
+        raise ConnectionError("app not up yet")
+    return type("R", (), {"json": lambda self: {"enabled": True, "node": "dieznode", "cell": "838db5fffffffff", "res": 3}})()
+def sleep(s):
+    sleeps.append(s)
+    if s == 1800:
+        raise Stop
+fake = lambda **kw: type("F", (), kw)
+ns = {"httpx": fake(get=staticmethod(get)), "time": fake(sleep=staticmethod(sleep)), "json": json,
+      "API": "http://app", "ANNOUNCE_S": 1800, "announcing": False, "log": logging.getLogger("t"),
+      "router": fake(announce=staticmethod(lambda h: None)), "me": fake(hash=b"x"),
+      "PRESENCE": fake(announce=staticmethod(lambda app_data: said.append(app_data)))}
+exec(compile(block, "bridge-announce", "exec"), ns)        # noqa: S102
+try:
+    ns["announce_loop"]()
+except Stop:
+    pass
+chk(f"a node not up yet is asked again soon (slept {sleeps})", sleeps == [30, 30, 1800])
+chk("and presence goes out once it answers", len(said) == 1 and ns["announcing"] is True)
+
 print("peers survive a restart, and presence listens" if not fails else f"{fails} failed")
 raise SystemExit(1 if fails else 0)
