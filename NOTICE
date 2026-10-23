@@ -1,0 +1,15 @@
+planetai-reticulum
+Copyright 2026 Fab City Foundation and contributors
+
+The code in this repository is under the Apache License 2.0 (LICENSE).
+
+The image it builds installs rns and lxmf from PyPI, by Mark Qvist, under the Reticulum License:
+https://github.com/markqvist/Reticulum/blob/master/LICENSE
+That licence is the MIT licence with two more conditions. The software may not be used in a system that can
+purposefully harm people, and it may not be used, directly or indirectly, to make a dataset for training an AI,
+machine learning or language model. It is not an open licence by the OSI's definition or the FSF's.
+
+Fab City publishes no image with rns or lxmf in it. Whoever builds this image installs them on their own machine,
+under those terms, and whoever passes a built image on must pass the Reticulum License on with it.
+
+It also installs httpx (BSD-3-Clause) and runs on the python:3.12-slim image.
