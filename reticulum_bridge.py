@@ -234,8 +234,13 @@ class H(BaseHTTPRequestHandler):
             return self._json(404, {})
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0")) or b"{}"))
         text = str(body.get("text", ""))[:1000]
-        sent = sum(1 for d in DESTS if deliver(d, text, body.get("title", "")))
-        self._json(200, {"queued": sent, "of": len(DESTS)})
+        # The node sends the addresses with each alert, read from its settings at that moment, so an address saved in
+        # Set up arrives with the next alert. RETICULUM_ALERT_DESTINATIONS here is only for a node too old to send them:
+        # it is read when this container is created, and Set up never recreates it.
+        to = body.get("to")
+        dests = DESTS if to is None else [str(d).strip().lower() for d in to if str(d).strip()]
+        sent = sum(1 for d in dests if deliver(d, text, body.get("title", "")))
+        self._json(200, {"queued": sent, "of": len(dests)})
 
 
 def announce_loop():

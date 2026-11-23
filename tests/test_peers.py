@@ -121,5 +121,23 @@ except Stop:
 chk(f"a node not up yet is asked again soon (slept {sleeps})", sleeps == [30, 30, 1800])
 chk("and presence goes out once it answers", len(said) == 1 and ns["announcing"] is True)
 
+# /send goes to the addresses the node sends with the alert, read from its settings at that moment. The bridge's own
+# RETICULUM_ALERT_DESTINATIONS is read when the container is created, so an address saved in Set up never got an
+# alert (23 Nov 2026). An older node sends no "to", and then the bridge's own list is still used.
+import io                                                   # noqa: E402
+start = src.index("    def do_POST(self):")
+end = src.index("\n\n\ndef announce_loop", start)
+block = "class H:\n" + src[start:end]
+for to, want in (({"to": [" AB12 ", "cd34", ""]}, ["ab12", "cd34"]), ({}, ["env1"]), ({"to": []}, [])):
+    sent, out = [], []
+    ns = {"json": json, "DESTS": ["env1"], "deliver": lambda d, text, title: sent.append(d) or True}
+    exec(compile(block, "bridge-send", "exec"), ns)          # noqa: S102
+    h = ns["H"]()
+    payload = json.dumps({"text": "act alert", **to}).encode()
+    h.path, h.headers, h.rfile = "/send", {"Content-Length": str(len(payload))}, io.BytesIO(payload)
+    h._json = lambda code, obj: out.append(obj)
+    h.do_POST()
+    chk(f"/send {to or 'with no to'} delivers to {want}", sent == want and out == [{"queued": len(want), "of": len(want)}])
+
 print("peers survive a restart, and presence listens" if not fails else f"{fails} failed")
 raise SystemExit(1 if fails else 0)
