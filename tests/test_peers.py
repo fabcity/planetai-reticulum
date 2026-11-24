@@ -143,8 +143,8 @@ def post_send(ns, to):
     h.do_POST()
     return sent, out
 
-for to, want in (({"to": [" AB12 ", "cd34", ""]}, ["ab12", "cd34"]), ({}, ["env1"]), ({"to": []}, [])):
-    ns = {"json": json, "DESTS": ["env1"], "alert_to": [], "_save_alert_to": lambda to: None}
+for to, want in (({"to": [" AB12 ", "cd 34", ""]}, ["ab12", "cd34"]), ({}, ["env1"]), ({"to": []}, [])):
+    ns = {"json": json, "DESTS": ["env1"], "alert_to": [], "_save_alert_to": lambda to: True}
     sent, out = post_send(ns, to)
     chk(f"/send {to or 'with no to'} delivers to {want}", sent == want and out == [{"queued": len(want), "of": len(want)}])
 
@@ -166,7 +166,8 @@ def bridge(dests):
           "httpx": fake_httpx, "RNS": fake_rns, "reply": lambda h, text: replies.append((h.hex(), text))}
     exec(compile(act_block, "bridge-act", "exec"), ns)     # noqa: S102
     return ns
-msg = lambda who, text: fake(content=text.encode(), source_hash=bytes.fromhex(who))
+msg = lambda who, text, signed=True: fake(content=text.encode(), source_hash=bytes.fromhex(who),
+                                         signature_validated=signed, unverified_reason=None if signed else 0x02)
 
 ns = bridge(["aa11"])
 ns["on_message"](msg("aa11", "act 3 closed the windows"))
@@ -178,6 +179,9 @@ ns["on_message"](msg("bb22", "act 5"))
 chk("a stranger who keeps trying is not answered again", len(posts) == 1 and len(replies) == 2)
 ns["on_message"](msg("bb22", "hello there"))
 chk("a message that is not an act is left alone", len(posts) == 1 and len(replies) == 2)
+# LXMF 1.1.1 delivers a message whose signature failed, so a forger can put an alert address in source_hash
+ns["on_message"](msg("aa11", "act 4", signed=False))
+chk("an act that only claims an alert address records nothing, and gets no reply", len(posts) == 1 and len(replies) == 2)
 
 post_send(ns, {"to": ["CC33", "aa11"]})
 ns["on_message"](msg("cc33", "act 6"))
@@ -195,6 +199,19 @@ pathlib.Path(d, "alert_to.json").write_text("{ not json")
 ns3 = bridge(["aa11"])
 ns3["on_message"](msg("aa11", "act 10"))
 chk("a corrupt list falls back to RETICULUM_ALERT_DESTINATIONS", [p["alert_id"] for p in posts][-1] == 10)
+
+# A list that cannot be written is not taken up either, so memory never runs ahead of the file: a restart cannot bring
+# back an address memory had dropped, and the next alert tries the write again.
+good = ns3["ALERT_TO_FILE"]
+post_send(ns3, {"to": ["dd44"]})
+ns3["ALERT_TO_FILE"] = os.path.join(d, "missing", "alert_to.json")
+post_send(ns3, {"to": []})
+chk("a list that cannot be saved is not taken up", ns3["alert_to"] == ["dd44"])
+ns3["ALERT_TO_FILE"] = good
+post_send(ns3, {"to": []})
+ns4 = bridge(["aa11"])
+ns4["on_message"](msg("dd44", "act 11"))
+chk("the next alert saves it, and a restart keeps the address out", ns3["alert_to"] == [] and posts[-1]["alert_id"] == 10)
 
 print("peers survive a restart, presence listens, and only the node's own people act" if not fails else f"{fails} failed")
 raise SystemExit(1 if fails else 0)

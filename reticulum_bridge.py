@@ -191,14 +191,16 @@ def _load_alert_to() -> list:
         return []
 
 
-def _save_alert_to(to: list) -> None:
+def _save_alert_to(to: list) -> bool:
     tmp = ALERT_TO_FILE + ".tmp"
     try:
         with open(tmp, "w") as f:
             json.dump(to, f)
         os.replace(tmp, ALERT_TO_FILE)
+        return True
     except Exception as e:                                  # noqa: BLE001
-        log.warning("could not write %s (%s)", ALERT_TO_FILE, e)
+        log.warning("could not write %s (%s); the next alert tries again", ALERT_TO_FILE, e)
+        return False
 
 
 alert_to = _load_alert_to()
@@ -211,6 +213,11 @@ def on_message(message):
     log.info("inbox from %s: %s", src, text[:120])
     m = ACT.match(text)
     if not m:
+        return
+    # LXMF hands over messages whose signature failed, or whose sender it has never heard, so source_hash is only a
+    # claim until the signature checks out. No reply: a forger needs none, and an unknown sender cannot get one.
+    if not message.signature_validated:
+        log.info("act from %s refused: signature not validated (%s)", src, message.unverified_reason)
         return
     who = RNS.hexrep(message.source_hash, delimit=False)
     if who not in DESTS and who not in alert_to:
@@ -282,10 +289,12 @@ class H(BaseHTTPRequestHandler):
         # Set up arrives with the next alert. RETICULUM_ALERT_DESTINATIONS here is only for a node too old to send them:
         # it is read when this container is created, and Set up never recreates it.
         to = body.get("to")
-        dests = DESTS if to is None else [str(d).strip().lower() for d in to if str(d).strip()]
-        if to is not None and dests != alert_to:            # who may act follows who gets the alerts
+        # all whitespace out, since bytes.fromhex skips it inside a hash while RNS.hexrep never writes any
+        dests = DESTS if to is None else [h for h in ("".join(str(d).split()).lower() for d in to) if h]
+        # who may act follows who gets the alerts, once the file holds it: memory never runs ahead of the file, so a
+        # restart cannot bring back an address memory had dropped, and a failed write is tried with the next alert
+        if to is not None and dests != alert_to and _save_alert_to(dests):
             alert_to[:] = dests
-            _save_alert_to(dests)
         sent = sum(1 for d in dests if deliver(d, text, body.get("title", "")))
         self._json(200, {"queued": sent, "of": len(dests)})
 
