@@ -95,7 +95,8 @@ chk(f"reads exactly the eight compose passes it (extra: {sorted(read - ENV)}, un
 # RETICULUM_ANNOUNCE_S. Seen on node #1 on 23 Oct 2026 at 12:54 UTC. The real two functions run here against a node
 # that answers on the third ask; the loop's long sleep ends the test.
 lift = lambda a, b: src[src.index(a):src.index(b, src.index(a))]
-block = lift("def announce_presence", "\n\ndef on_message") + "\n\n" + lift("def announce_loop", "\n\nthreading.Thread")
+WHO = "# ---------------------------------------------------------------- who may act"
+block = lift("def announce_presence", "\n\n" + WHO) + "\n\n" + lift("def announce_loop", "\n\nthreading.Thread")
 
 class Stop(BaseException): pass
 asks, sleeps, said = [], [], []
@@ -128,16 +129,72 @@ import io                                                   # noqa: E402
 start = src.index("    def do_POST(self):")
 end = src.index("\n\n\ndef announce_loop", start)
 block = "class H:\n" + src[start:end]
-for to, want in (({"to": [" AB12 ", "cd34", ""]}, ["ab12", "cd34"]), ({}, ["env1"]), ({"to": []}, [])):
-    sent, out = [], []
-    ns = {"json": json, "DESTS": ["env1"], "deliver": lambda d, text, title: sent.append(d) or True}
-    exec(compile(block, "bridge-send", "exec"), ns)          # noqa: S102
+send_block = block
+def post_send(ns, to):
+    """Run the real do_POST in `ns` with one /send body; return what it delivered to."""
+    sent = []
+    ns["deliver"] = lambda d, text, title: sent.append(d) or True
+    exec(compile(send_block, "bridge-send", "exec"), ns)     # noqa: S102
     h = ns["H"]()
     payload = json.dumps({"text": "act alert", **to}).encode()
     h.path, h.headers, h.rfile = "/send", {"Content-Length": str(len(payload))}, io.BytesIO(payload)
+    out = []
     h._json = lambda code, obj: out.append(obj)
     h.do_POST()
+    return sent, out
+
+for to, want in (({"to": [" AB12 ", "cd34", ""]}, ["ab12", "cd34"]), ({}, ["env1"]), ({"to": []}, [])):
+    ns = {"json": json, "DESTS": ["env1"], "alert_to": [], "_save_alert_to": lambda to: None}
+    sent, out = post_send(ns, to)
     chk(f"/send {to or 'with no to'} delivers to {want}", sent == want and out == [{"queued": len(want), "of": len(want)}])
 
-print("peers survive a restart, and presence listens" if not fails else f"{fails} failed")
+# An `act` closes an alert and counts in ρ, which the node publishes. On a LAN or a tailnet only the household could
+# send one; on a hub anyone who heard the address can (SPEC_hub §5 in planetai-node, 24 Nov 2026). So an act counts
+# only from an address the node sends alerts to: RETICULUM_ALERT_DESTINATIONS, or the last `to` list /send was given.
+# The real who-may-act block and on_message run here, with the node, the replies and RNS faked.
+assert WHO in src, "reticulum_bridge.py has no who-may-act section: any sender on a hub can close this node's alerts"
+act_block = src[src.index("ACT = re.compile"):].split("\n", 1)[0] + "\n\n" + lift(WHO, "\n\nrouter.register_delivery_callback")
+posts, replies = [], []
+class Resp:
+    def raise_for_status(self): pass
+fake_httpx = fake(post=staticmethod(lambda url, json, headers, timeout: posts.append(json) or Resp()))
+fake_rns = fake(hexrep=staticmethod(lambda b, delimit=True: b.hex()), prettyhexrep=staticmethod(lambda b: f"<{b.hex()}>"))
+d = tempfile.mkdtemp()
+def bridge(dests):
+    """A fresh container: the who-may-act block exec'd against DATA = d, as a restart would load it."""
+    ns = {"os": os, "re": re, "json": json, "DATA": d, "DESTS": dests, "log": logging.getLogger("t"), "API": "http://app",
+          "httpx": fake_httpx, "RNS": fake_rns, "reply": lambda h, text: replies.append((h.hex(), text))}
+    exec(compile(act_block, "bridge-act", "exec"), ns)     # noqa: S102
+    return ns
+msg = lambda who, text: fake(content=text.encode(), source_hash=bytes.fromhex(who))
+
+ns = bridge(["aa11"])
+ns["on_message"](msg("aa11", "act 3 closed the windows"))
+chk("an act from an alert address is recorded", [p["alert_id"] for p in posts] == [3])
+ns["on_message"](msg("bb22", "act 4"))
+chk("an act from a stranger records nothing", len(posts) == 1)
+chk("and the stranger is told why, once", len(replies) == 2 and replies[-1][0] == "bb22" and "only from" in replies[-1][1])
+ns["on_message"](msg("bb22", "act 5"))
+chk("a stranger who keeps trying is not answered again", len(posts) == 1 and len(replies) == 2)
+ns["on_message"](msg("bb22", "hello there"))
+chk("a message that is not an act is left alone", len(posts) == 1 and len(replies) == 2)
+
+post_send(ns, {"to": ["CC33", "aa11"]})
+ns["on_message"](msg("cc33", "act 6"))
+chk("an address the node sent an alert to may act", [p["alert_id"] for p in posts] == [3, 6])
+ns2 = bridge([])
+ns2["on_message"](msg("cc33", "act 7"))
+chk("and still may after a restart", [p["alert_id"] for p in posts] == [3, 6, 7])
+post_send(ns2, {"to": ["aa11"]})
+ns2["on_message"](msg("cc33", "act 8"))
+chk("an address taken out of Set up stops counting with the next alert", [p["alert_id"] for p in posts] == [3, 6, 7])
+post_send(ns2, {})
+ns2["on_message"](msg("aa11", "act 9"))
+chk("an alert from an old node with no to list forgets nothing", [p["alert_id"] for p in posts] == [3, 6, 7, 9])
+pathlib.Path(d, "alert_to.json").write_text("{ not json")
+ns3 = bridge(["aa11"])
+ns3["on_message"](msg("aa11", "act 10"))
+chk("a corrupt list falls back to RETICULUM_ALERT_DESTINATIONS", [p["alert_id"] for p in posts][-1] == 10)
+
+print("peers survive a restart, presence listens, and only the node's own people act" if not fails else f"{fails} failed")
 raise SystemExit(1 if fails else 0)

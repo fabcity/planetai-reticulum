@@ -8,7 +8,8 @@ What it gives the node:
     the distance between two nodes is the distance between two cell centres. Off until a household
     sets RETICULUM_PRESENCE=1; the node decides, this container only asks and obeys.
   · an inbox: a message whose text is  `act <alert id> [note]`  becomes POST /actions on the node — closing the
-    loop over a medium that works with no internet, exactly as a Telegram reply or `planetai act` would
+    loop over a medium that works with no internet, exactly as a Telegram reply or `planetai act` would. Only from an
+    address the node sends its alerts to: anyone else gets one reply saying so, and nothing is written
   · an outbox: POST /send {"text": ...} delivers the text to every LXMF destination in RETICULUM_ALERT_DESTINATIONS
 
 Transport is whatever config/reticulum/config enables: the TCP server always (reachable over the LAN or the
@@ -168,12 +169,55 @@ def announce_presence() -> bool:
     return True
 
 
+# ---------------------------------------------------------------- who may act
+#
+# An `act` closes an alert and counts in ρ, which the node publishes. On a LAN or a tailnet only the household could
+# send one; on a hub, anyone who heard this address can. So an act counts only from an address this node sends its
+# alerts to: RETICULUM_ALERT_DESTINATIONS, or the last `to` list /send was given. The node sends its Set up list with
+# every alert, so an address taken out there stops counting with the next alert. The list is kept in /data, so a
+# restart between two alerts does not forget it.
+ALERT_TO_FILE = os.path.join(DATA, "alert_to.json")
+
+
+def _load_alert_to() -> list:
+    try:
+        with open(ALERT_TO_FILE) as f:
+            rows = json.load(f)
+        return [str(d) for d in rows] if isinstance(rows, list) else []
+    except FileNotFoundError:
+        return []
+    except Exception as e:                                  # noqa: BLE001 — a bad file narrows who may act, nothing worse
+        log.warning("could not read %s (%s); only RETICULUM_ALERT_DESTINATIONS may act", ALERT_TO_FILE, e)
+        return []
+
+
+def _save_alert_to(to: list) -> None:
+    tmp = ALERT_TO_FILE + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(to, f)
+        os.replace(tmp, ALERT_TO_FILE)
+    except Exception as e:                                  # noqa: BLE001
+        log.warning("could not write %s (%s)", ALERT_TO_FILE, e)
+
+
+alert_to = _load_alert_to()
+told: set = set()   # ponytail: strangers told once per container run; a disk-backed list if a hub gets busy
+
+
 def on_message(message):
     text = (message.content or b"").decode("utf-8", "ignore").strip()
     src = RNS.prettyhexrep(message.source_hash)
     log.info("inbox from %s: %s", src, text[:120])
     m = ACT.match(text)
     if not m:
+        return
+    who = RNS.hexrep(message.source_hash, delimit=False)
+    if who not in DESTS and who not in alert_to:
+        log.info("act from %s refused: not an address this node sends alerts to", src)
+        if who not in told:
+            told.add(who)
+            reply(message.source_hash, "this node takes act only from the addresses it sends alerts to")
         return
     alert_id, note = int(m.group(1)), (m.group(2).strip() or "acted (via reticulum)")
     try:
@@ -239,6 +283,9 @@ class H(BaseHTTPRequestHandler):
         # it is read when this container is created, and Set up never recreates it.
         to = body.get("to")
         dests = DESTS if to is None else [str(d).strip().lower() for d in to if str(d).strip()]
+        if to is not None and dests != alert_to:            # who may act follows who gets the alerts
+            alert_to[:] = dests
+            _save_alert_to(dests)
         sent = sum(1 for d in dests if deliver(d, text, body.get("title", "")))
         self._json(200, {"queued": sent, "of": len(dests)})
 
