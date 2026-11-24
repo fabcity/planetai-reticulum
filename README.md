@@ -7,7 +7,8 @@ internet in between.
 It runs in its own container, beside the node, and does four things:
 
 - announces the node's LXMF address
-- turns a message like `act 12 closed the windows` into an action on alert 12, the same as a Telegram reply
+- turns a message like `act 12 closed the windows` into an action on alert 12, the same as a Telegram reply. It
+  takes one only from an address the node sends its alerts to, so a stranger on a shared network cannot close them
 - delivers the node's alerts to the LXMF addresses the node sends with each one (Set up › Sharing on the node).
   A node too old to send them gets the bridge's own `RETICULUM_ALERT_DESTINATIONS` instead
 - if the household turns presence on, announces the node's name and a coarse map cell, and keeps a list of the
