@@ -221,6 +221,7 @@ def _save_alert_to(to: list) -> bool:
 
 
 alert_to = _load_alert_to()
+send_lock = threading.Lock()
 told: set = set()   # ponytail: strangers told once per container run; a disk-backed list if a hub gets busy
 
 
@@ -262,18 +263,21 @@ def _load_inbox() -> dict:
         return {}
 
 
-def _save_inbox() -> None:
+def _save_inbox(rows: dict) -> bool:
     tmp = INBOX_FILE + ".tmp"
     try:
         with open(tmp, "w") as f:
-            json.dump(inbox, f)
+            json.dump(rows, f)
         os.replace(tmp, INBOX_FILE)
+        return True
     except Exception as e:                                  # noqa: BLE001
         log.warning("could not write %s (%s)", INBOX_FILE, e)
+        return False
 
 
 inbox = _load_inbox()
 inbox_lock = threading.Lock()
+hello_lock = threading.Lock()  # one POST /hello at a time, so two cannot clear each other's waiting state
 waiting: set = set()          # inbox addresses a POST /hello is waiting on
 answers: dict = {}            # and what each said back: address -> (when, text)
 
@@ -290,11 +294,17 @@ def take_hello(message, who: str, raw: str) -> None:
             told.add(("hello", who))
             reply(message.source_hash, "not kept: hello takes the entry planetai hello writes, and nothing else")
         return
-    with inbox_lock:
-        inbox[who] = {"from": who, "at": int(time.time()), "entry": e}
-        for k, _ in sorted(inbox.items(), key=lambda kv: kv[1]["at"])[:max(0, len(inbox) - INBOX_MAX)]:
-            inbox.pop(k, None)
-        _save_inbox()
+    with inbox_lock:                                        # the file first: "received" only for what a restart keeps
+        rows = dict(inbox, **{who: {"from": who, "at": int(time.time()), "entry": e}})
+        for k, _ in sorted(rows.items(), key=lambda kv: kv[1]["at"])[:max(0, len(rows) - INBOX_MAX)]:
+            rows.pop(k, None)
+        saved = _save_inbox(rows)
+        if saved:
+            inbox.clear()
+            inbox.update(rows)
+    if not saved:
+        reply(message.source_hash, "not kept: the inbox could not save it. Send it again later")
+        return
     log.info("hello from %s kept: %s", src, e["name"])
     reply(message.source_hash, "received: a person reads it before it is listed")
 
@@ -308,7 +318,7 @@ def on_message(message):
         who, h = RNS.hexrep(message.source_hash, delimit=False), HELLO.match(text)
         if h:
             take_hello(message, who, h.group(1))
-        elif who in waiting:                                # an inbox answering the hello this node sent
+        elif who in waiting and message.signature_validated:   # an inbox answering the hello this node sent, really it
             answers[who] = (time.time(), text)
         return
     # LXMF hands over messages whose signature failed, or whose sender it has never heard, so source_hash is only a
@@ -407,8 +417,9 @@ class H(BaseHTTPRequestHandler):
         dests = DESTS if to is None else [h for h in ("".join(str(d).split()).lower() for d in to) if h]
         # who may act follows who gets the alerts, once the file holds it: memory never runs ahead of the file, so a
         # restart cannot bring back an address memory had dropped, and a failed write is tried with the next alert
-        if to is not None and dests != alert_to and _save_alert_to(dests):
-            alert_to[:] = dests
+        with send_lock:                                     # the server is threaded: one /send at a time saves the list
+            if to is not None and dests != alert_to and _save_alert_to(dests):
+                alert_to[:] = dests
         sent = sum(1 for d in dests if deliver(d, text, body.get("title", "")))
         self._json(200, {"queued": sent, "of": len(dests)})
 
@@ -419,6 +430,10 @@ class H(BaseHTTPRequestHandler):
         to, e = "".join(str(body.get("inbox", "")).split()).lower(), body.get("entry")
         if not to or not isinstance(e, dict) or hello_entry(json.dumps(e)) is None:
             return self._json(400, {"error": "send an inbox address and an entry planetai hello writes"})
+        with hello_lock:
+            return self._hello_one(to, e)
+
+    def _hello_one(self, to, e):
         t0 = time.time()
         waiting.add(to)
         try:

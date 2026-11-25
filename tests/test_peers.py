@@ -213,7 +213,7 @@ def post_send(ns, to):
     return sent, out
 
 for to, want in (({"to": [" AB12 ", "cd 34", ""]}, ["ab12", "cd34"]), ({}, ["env1"]), ({"to": []}, [])):
-    ns = {"json": json, "DESTS": ["env1"], "alert_to": [], "_save_alert_to": lambda to: True}
+    ns = {"json": json, "DESTS": ["env1"], "alert_to": [], "_save_alert_to": lambda to: True, "send_lock": threading.Lock()}
     sent, out = post_send(ns, to)
     chk(f"/send {to or 'with no to'} delivers to {want}", sent == want and out == [{"queued": len(want), "of": len(want)}])
 
@@ -313,6 +313,12 @@ for who, t in (("a1", 1), ("a2", 2)):
     hb2["on_message"](msg(who, "hello " + json.dumps(dict(entry, name=who))))
     hb2["inbox"][who]["at"] = t0 + t
 chk("at most INBOX_MAX, the oldest out first", sorted(hb2["inbox"]) == ["a1", "a2"])
+# "received" only for what a restart keeps: a hello the inbox could not save is not kept and the sender is told so
+good, hb2["INBOX_FILE"] = hb2["INBOX_FILE"], os.path.join(d, "missing", "inbox.json")
+hb2["on_message"](msg("a3", "hello " + json.dumps(dict(entry, name="a3"))))
+chk("a hello the inbox cannot save is not kept, and not acknowledged",
+    "a3" not in hb2["inbox"] and replies[-1] == ("a3", "not kept: the inbox could not save it. Send it again later"))
+hb2["INBOX_FILE"] = good
 
 # GET /inbox lists them, newest first; POST /hello sends this node's entry and returns what the inbox said, and never
 # touches who may act (it is not /send)
@@ -342,6 +348,11 @@ chk("and leaves who may act as it was, keeping no answer once it stops waiting",
 hb2["deliver"] = lambda to, text, title: True
 code, got = handler(hb2, "POST", "/hello", {"inbox": "1b4f", "entry": entry})
 chk("an inbox that does not answer in time is said so", got == {"sent": True, "answer": None})
+# an answer whose signature failed is not the inbox's, however it claims to be: the wait goes on to its end
+hb2["deliver"] = lambda to, text, title: threading.Timer(0.2, lambda: hb2["on_message"](
+    msg(to, "received: forged", signed=False))).start() or True
+code, got = handler(hb2, "POST", "/hello", {"inbox": "1b4f", "entry": entry})
+chk("an unsigned answer does not end the wait", got == {"sent": True, "answer": None})
 code, got = handler(hb2, "POST", "/hello", {"inbox": "1b4f", "entry": dict(entry, readings=[1])})
 chk("and an entry planetai hello would not write is not sent", code == 400)
 
