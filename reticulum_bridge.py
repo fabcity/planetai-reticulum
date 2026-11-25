@@ -11,6 +11,8 @@ What it gives the node:
     loop over a medium that works with no internet, exactly as a Telegram reply or `planetai act` would. Only from an
     address the node sends its alerts to: anyone else gets one reply saying so, and nothing is written
   · an outbox: POST /send {"text": ...} delivers the text to every LXMF destination in RETICULUM_ALERT_DESTINATIONS
+  · hello: on the programme's inbox, a message `hello <entry as JSON>` asking to be listed is kept for a person to read
+    (GET /inbox); on any node, POST /hello sends this node's entry to the inbox and returns what the inbox answered
 
 Transport is whatever config/reticulum/config enables: the TCP server always (reachable over the LAN or the
 tailnet); a Fab City hub when `planetai reticulum` writes its block, so nodes hear each other with nothing open on
@@ -31,7 +33,7 @@ import shutil
 import re
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import httpx
 import LXMF
@@ -219,7 +221,92 @@ def _save_alert_to(to: list) -> bool:
 
 
 alert_to = _load_alert_to()
+send_lock = threading.Lock()
 told: set = set()   # ponytail: strangers told once per container run; a disk-backed list if a hub gets busy
+
+
+# ---------------------------------------------------------------- hello: the programme's inbox
+#
+# A node asks to be on the programme's list (registry.json) by sending `hello <its entry as JSON>` to the inbox, an LXMF
+# address registry.json names (SPEC_hub §9 in planetai-node). The inbox keeps an entry that holds only the fields
+# `planetai hello` writes, from a sender whose signature checks out, and a person reads it before anything is listed:
+# `planetai hello --inbox` on the inbox's node opens the pull request, and the merge is the approval. Anyone may ask,
+# so there is no allowlist, and nothing here writes to the node.
+HELLO = re.compile(r"^\s*hello\s+(\{.*\})\s*$", re.I | re.S)
+HELLO_FIELDS = {"name", "scale", "operator", "place", "cell", "lat", "lon", "sources", "parent", "since", "id", "key", "contact"}
+HELLO_WAIT_S = 60              # how long POST /hello waits for the inbox's answer
+INBOX_FILE = os.path.join(DATA, "inbox.json")
+INBOX_MAX = 200                # ponytail: the newest entry per sender, 200 in all; a queue with history if a busy week needs it
+
+
+def hello_entry(raw: str):
+    """The entry, when it is one `planetai hello` could have written: a JSON object of those fields only, with a name."""
+    try:
+        e = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(e, dict) or not isinstance(e.get("name"), str) or not e["name"].strip() or not set(e) <= HELLO_FIELDS:
+        return None
+    return e if len(json.dumps(e)) <= 4000 else None
+
+
+def _load_inbox() -> dict:
+    try:
+        with open(INBOX_FILE) as f:
+            rows = json.load(f)
+        return {k: v for k, v in rows.items() if isinstance(v, dict) and hello_entry(json.dumps(v.get("entry")))} \
+            if isinstance(rows, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except Exception as e:                                  # noqa: BLE001 — a bad file costs the waiting entries, not the bridge
+        log.warning("could not read %s (%s); the inbox starts empty", INBOX_FILE, e)
+        return {}
+
+
+def _save_inbox(rows: dict) -> bool:
+    tmp = INBOX_FILE + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(rows, f)
+        os.replace(tmp, INBOX_FILE)
+        return True
+    except Exception as e:                                  # noqa: BLE001
+        log.warning("could not write %s (%s)", INBOX_FILE, e)
+        return False
+
+
+inbox = _load_inbox()
+inbox_lock = threading.Lock()
+hello_lock = threading.Lock()  # one POST /hello at a time, so two cannot clear each other's waiting state
+waiting: set = set()          # inbox addresses a POST /hello is waiting on
+answers: dict = {}            # and what each said back: address -> (when, text)
+
+
+def take_hello(message, who: str, raw: str) -> None:
+    src = RNS.prettyhexrep(message.source_hash)
+    if not message.signature_validated:                     # the sender's slot is keyed by its address, so it must be its own
+        log.info("hello from %s refused: signature not validated", src)
+        return
+    e = hello_entry(raw)
+    if e is None:
+        log.info("hello from %s not kept: not an entry planetai hello writes", src)
+        if ("hello", who) not in told:
+            told.add(("hello", who))
+            reply(message.source_hash, "not kept: hello takes the entry planetai hello writes, and nothing else")
+        return
+    with inbox_lock:                                        # the file first: "received" only for what a restart keeps
+        rows = dict(inbox, **{who: {"from": who, "at": int(time.time()), "entry": e}})
+        for k, _ in sorted(rows.items(), key=lambda kv: kv[1]["at"])[:max(0, len(rows) - INBOX_MAX)]:
+            rows.pop(k, None)
+        saved = _save_inbox(rows)
+        if saved:
+            inbox.clear()
+            inbox.update(rows)
+    if not saved:
+        reply(message.source_hash, "not kept: the inbox could not save it. Send it again later")
+        return
+    log.info("hello from %s kept: %s", src, e["name"])
+    reply(message.source_hash, "received: a person reads it before it is listed")
 
 
 def on_message(message):
@@ -228,6 +315,11 @@ def on_message(message):
     log.info("inbox from %s: %s", src, text[:120])
     m = ACT.match(text)
     if not m:
+        who, h = RNS.hexrep(message.source_hash, delimit=False), HELLO.match(text)
+        if h:
+            take_hello(message, who, h.group(1))
+        elif who in waiting and message.signature_validated:   # an inbox answering the hello this node sent, really it
+            answers[who] = (time.time(), text)
         return
     # LXMF hands over messages whose signature failed, or whose sender it has never heard, so source_hash is only a
     # claim until the signature checks out. No reply: a forger needs none, and an unknown sender cannot get one.
@@ -300,6 +392,10 @@ class H(BaseHTTPRequestHandler):
                              "destinations": len(DESTS), "announcing": announcing,
                              "presence": RNS.hexrep(PRESENCE.hash, delimit=False),
                              "transport": RNS.Reticulum.transport_enabled(), "interfaces": interfaces()})
+        elif self.path == "/inbox":
+            with inbox_lock:
+                rows = sorted(inbox.values(), key=lambda r: -r["at"])
+            self._json(200, {"inbox": rows})
         elif self.path == "/peers":
             with heard_lock:
                 rows = sorted(heard.values(), key=lambda r: -r["last"])
@@ -307,9 +403,11 @@ class H(BaseHTTPRequestHandler):
         else:
             self._json(404, {})
     def do_POST(self):
-        if self.path != "/send":
+        if self.path not in ("/send", "/hello"):
             return self._json(404, {})
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0")) or b"{}"))
+        if self.path == "/hello":
+            return self._hello(body)
         text = str(body.get("text", ""))[:1000]
         # The node sends the addresses with each alert, read from its settings at that moment, so an address saved in
         # Set up arrives with the next alert. RETICULUM_ALERT_DESTINATIONS here is only for a node too old to send them:
@@ -319,10 +417,40 @@ class H(BaseHTTPRequestHandler):
         dests = DESTS if to is None else [h for h in ("".join(str(d).split()).lower() for d in to) if h]
         # who may act follows who gets the alerts, once the file holds it: memory never runs ahead of the file, so a
         # restart cannot bring back an address memory had dropped, and a failed write is tried with the next alert
-        if to is not None and dests != alert_to and _save_alert_to(dests):
-            alert_to[:] = dests
+        with send_lock:                                     # the server is threaded: one /send at a time saves the list
+            if to is not None and dests != alert_to and _save_alert_to(dests):
+                alert_to[:] = dests
         sent = sum(1 for d in dests if deliver(d, text, body.get("title", "")))
         self._json(200, {"queued": sent, "of": len(dests)})
+
+
+    def _hello(self, body):
+        """Send this node's entry to the inbox and wait for its answer. Its own route, never /send: /send's `to` list
+        decides who may act, and an inbox is not one of the household's addresses."""
+        to, e = "".join(str(body.get("inbox", "")).split()).lower(), body.get("entry")
+        if not to or not isinstance(e, dict) or hello_entry(json.dumps(e)) is None:
+            return self._json(400, {"error": "send an inbox address and an entry planetai hello writes"})
+        with hello_lock:
+            return self._hello_one(to, e)
+
+    def _hello_one(self, to, e):
+        t0 = time.time()
+        waiting.add(to)
+        try:
+            # the inbox checks the hello's signature against this node's identity, which it knows only from an announce;
+            # a node that just started may have announced before its hub was up. deliver's path request gives it time.
+            router.announce(me.hash)
+            if not deliver(to, "hello " + json.dumps(e, separators=(",", ":")), "hello"):
+                return self._json(200, {"sent": False, "answer": None})
+            for _ in range(int(HELLO_WAIT_S * 2)):
+                a = answers.get(to)
+                if a and a[0] >= t0:
+                    return self._json(200, {"sent": True, "answer": a[1]})
+                time.sleep(0.5)
+            return self._json(200, {"sent": True, "answer": None})
+        finally:
+            waiting.discard(to)
+            answers.pop(to, None)
 
 
 def announce_loop():
@@ -351,4 +479,4 @@ def announce_loop():
 threading.Thread(target=announce_loop, daemon=True).start()
 log.info("bridge up: http :4243, announcing every %ss, %d alert destination(s), presence at %s",
          ANNOUNCE_S, len(DESTS), RNS.prettyhexrep(PRESENCE.hash))
-HTTPServer(("0.0.0.0", 4243), H).serve_forever()
+ThreadingHTTPServer(("0.0.0.0", 4243), H).serve_forever()     # threads: POST /hello waits a minute, /health must not

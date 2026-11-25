@@ -4,7 +4,7 @@ The Reticulum bridge for a [PLANETAI node](https://github.com/fabcity/planetai-n
 address, so people can write to it from Sideband or NomadNet over the LAN, the tailnet or a LoRa radio, with no
 internet in between.
 
-It runs in its own container, beside the node, and does four things:
+It runs in its own container, beside the node, and does five things:
 
 - announces the node's LXMF address
 - turns a message like `act 12 closed the windows` into an action on alert 12, the same as a Telegram reply. It
@@ -13,8 +13,11 @@ It runs in its own container, beside the node, and does four things:
   A node too old to send them gets the bridge's own `RETICULUM_ALERT_DESTINATIONS` instead
 - if the household turns presence on, announces the node's name and a coarse map cell, and keeps a list of the
   other nodes it hears
+- sends the node's `hello`, its ask to be on the programme's list, to the inbox `registry.json` names, and returns
+  what the inbox answered (`POST /hello`). On the inbox's own node it keeps the hellos that arrive, one per sender,
+  for a person to read before anything is listed (`GET /inbox`)
 
-The node talks to it over HTTP only (`/health`, `/peers`, `/send`), and it talks back to the node's API. It never
+The node talks to it over HTTP only (`/health`, `/peers`, `/send`, `/hello`, `/inbox`), and it talks back to the node's API. It never
 sees the node's `.env`: compose hands it eight variables and that is all it reads.
 
 ## Why it has its own repository
