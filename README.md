@@ -64,10 +64,13 @@ To make a node a hub:
    plain `TCPClientInterface`.
 
 3. Check `curl localhost:4243/health`: `transport` is `true`, and `TCP Server` under `interfaces` counts the nodes
-   connected (`clients`). On a node that dials a hub, `Fab City hub` says whether it is up.
+   connected (`clients`). On a node that dials a hub, `Fab City hub` is `online` while its openssl runs. openssl
+   exits when the connection or the certificate fails, so a hub that refuses shows as down within seconds, and a
+   connection still being set up already shows as up.
 
-A hub keeps what Reticulum needs to route, paths and known identities, and nothing more. Each node on it decides what
-it says: its name and LXMF address always, its rough map cell only with presence on.
+To route, Reticulum keeps paths and known identities. The hub's bridge, like every node's, also keeps the presence
+announces it hears in `/data/peers.json`: each node's name, id, rough map cell and when it was heard. Each node
+decides what it says: its name and LXMF address always, the rest only with presence on.
 
 ## Changing it
 

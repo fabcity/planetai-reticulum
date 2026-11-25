@@ -164,8 +164,8 @@ for up in (True, False):
 # config.tpl carries the hub block commented, word for word what `planetai reticulum` writes when a household says yes
 tpl = pathlib.Path(__file__).resolve().parent.parent.joinpath("config.tpl").read_text()
 chk("config.tpl has the hub block, commented", "  # [[Fab City hub]]\n  #   type = PipeInterface\n" in tpl)
-chk("and it checks the hub's certificate", "openssl s_client -quiet -verify_return_error -connect fabalabbali.tail71245c.ts.net:443"
-    " -servername fabalabbali.tail71245c.ts.net" in tpl)
+# -servername only sends the name; without -verify_hostname any trusted certificate passes (CodeRabbit on #2)
+chk("and it checks that the certificate is the hub's, by name", "openssl s_client -quiet -verify_return_error -verify_hostname fabalabbali.tail71245c.ts.net -connect fabalabbali.tail71245c.ts.net:443 -servername fabalabbali.tail71245c.ts.net" in tpl)
 chk("transport stays off for a node that is not a hub", re.search(r"(?m)^  enable_transport = No\b", tpl) is not None)
 
 # /send goes to the addresses the node sends with the alert, read from its settings at that moment. The bridge's own
