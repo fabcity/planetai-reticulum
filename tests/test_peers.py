@@ -97,40 +97,60 @@ chk(f"reads exactly the eight compose passes it (extra: {sorted(read - ENV)}, un
 # that answers on the third ask; the loop's long sleep ends the test.
 lift = lambda a, b: src[src.index(a):src.index(b, src.index(a))]
 WHO = "# ---------------------------------------------------------------- who may act"
-block = lift("def announce_presence", "\n\n" + WHO) + "\n\n" + lift("def announce_loop", "\n\nthreading.Thread")
+loop_block = lift("said = None", "\n\n" + WHO) + "\n\n" + lift("def announce_loop", "\n\nthreading.Thread")
 
 class Stop(BaseException): pass
-asks, sleeps, said, defaults = [], [], [], []
-def get(url, timeout):
-    asks.append(url)
-    if len(asks) < 3:
-        raise ConnectionError("app not up yet")
-    return type("R", (), {"json": lambda self: {"enabled": True, "node": "dieznode", "cell": "838db5fffffffff", "res": 3,
-                                                "id": "lfzfhebv76r45tfr", "lat": -8.8}})()
-def sleep(s):
-    sleeps.append(s)
-    if s == 1800:
-        raise Stop
 fake = lambda **kw: type("F", (), kw)
-ns = {"httpx": fake(get=staticmethod(get)), "time": fake(sleep=staticmethod(sleep)), "json": json,
-      "API": "http://app", "ANNOUNCE_S": 1800, "announcing": False, "log": logging.getLogger("t"),
-      "router": fake(announce=staticmethod(lambda h: None)), "me": fake(hash=b"x"),
-      "PRESENCE": fake(announce=staticmethod(lambda app_data: said.append(app_data)),
-                       set_default_app_data=staticmethod(lambda d: defaults.append(d)))}
-exec(compile(block, "bridge-announce", "exec"), ns)        # noqa: S102
-try:
-    ns["announce_loop"]()
-except Stop:
-    pass
-chk(f"a node not up yet is asked again soon (slept {sleeps})", sleeps == [30, 30, 1800])
-chk("and presence goes out once it answers", len(said) == 1 and ns["announcing"] is True)
-chk("with the node's id, so a heard node can be matched to a listed one",
-    json.loads(said[0]) == {"node": "dieznode", "cell": "838db5fffffffff", "res": 3, "id": "lfzfhebv76r45tfr"})
+def run_loop(answers):
+    """The real announce_presence and announce_loop against a node whose n-th answer to GET /presence is answers[n]
+    (None: not up yet; the last one repeats), until the loop's half-hour sleep. Returns the namespace, every announce
+    as (seconds since start, body), and every body a path answer was set to carry (None: nothing)."""
+    clock, asks, said, defaults = [0], [], [], []
+    def get(url, timeout):
+        a = answers[min(len(asks), len(answers) - 1)]
+        asks.append(url)
+        if a is None:
+            raise ConnectionError("app not up yet")
+        return type("R", (), {"json": lambda self: a})()
+    def sleep(s):
+        if s == 1800:
+            raise Stop
+        clock[0] += s
+    ns = {"httpx": fake(get=staticmethod(get)), "time": fake(sleep=staticmethod(sleep)), "json": json,
+          "API": "http://app", "ANNOUNCE_S": 1800, "announcing": False, "log": logging.getLogger("t"),
+          "router": fake(announce=staticmethod(lambda h: None)), "me": fake(hash=b"x"),
+          "PRESENCE": fake(announce=staticmethod(lambda app_data: said.append((clock[0], json.loads(app_data)))),
+                           set_default_app_data=staticmethod(lambda d: defaults.append(d and json.loads(d))))}
+    exec(compile(loop_block, "bridge-announce", "exec"), ns)  # noqa: S102
+    try:
+        ns["announce_loop"]()
+    except Stop:
+        pass
+    return ns, said, defaults
 
-chk("and a node asking for its path hears the same body, not an empty announce", defaults == said)
-ns["httpx"] = fake(get=staticmethod(lambda url, timeout: type("R", (), {"json": lambda self: {"enabled": False}})()))
-ns["announce_presence"]()
-chk("turned off, a path answer carries nothing either", defaults[-1] is None and ns["announcing"] is False)
+ME = {"enabled": True, "node": "dieznode", "cell": "838db5fffffffff", "res": 3, "id": "lfzfhebv76r45tfr", "lat": -8.8}
+SAY = {k: ME[k] for k in ("node", "cell", "res", "id")}
+OFF = {"enabled": False}
+ns, said, defaults = run_loop([None, None, ME])
+chk(f"a node not up yet is asked again soon (announced at {[t for t, _ in said]} s)", said and said[0][0] == 60)
+chk("and presence goes out once it answers, and once only while it says the same",
+    len(said) == 1 and ns["announcing"] is True)
+chk("with the node's id, so a heard node can be matched to a listed one", said[0][1] == SAY)
+chk("and a node asking for its path hears the same body, not an empty announce", defaults == [SAY])
+
+# `planetai update` recreates this container and then the app, so the first ask can reach the old app: its version,
+# and before planetai-node #425 no id. That body went out and stayed for RETICULUM_ANNOUNCE_S (node #1, 25 Nov 2026).
+OLD = {"enabled": True, "node": "dieznode", "cell": "838db5fffffffff", "res": 3, "version": "v0.92.0"}
+NEW = dict(ME, version="v0.93.0")
+ns, said, defaults = run_loop([OLD, NEW])
+chk(f"the new app's body goes out minutes after the old one's, not half an hour (said {said})",
+    [b for _, b in said] == [{k: OLD[k] for k in ("node", "cell", "res", "version")}, dict(SAY, version="v0.93.0")]
+    and said[1][0] <= 600)
+chk("and a path answer carries the newest body", defaults[-1] == said[-1][1])
+ns, said, defaults = run_loop([ME, OFF])
+chk("turned off, a path answer carries nothing either", defaults[-1] is None and ns["announcing"] is False and len(said) == 1)
+ns, said, defaults = run_loop([ME, OFF, ME])
+chk("and turned on again, the same body goes out again", [b for _, b in said] == [SAY, SAY] and defaults[-1] == SAY)
 
 # The receiving half keeps the id too (SPEC_hub §7 in planetai-node). The real handler runs with RNS faked.
 block = lift("class PresenceHandler", "\n\nRNS.Transport.register_announce_handler")

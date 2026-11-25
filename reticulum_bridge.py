@@ -153,10 +153,14 @@ class PresenceHandler:
 RNS.Transport.register_announce_handler(PresenceHandler())
 
 
-def announce_presence() -> bool:
-    """Ask the node what it is willing to say, then say exactly that — or nothing. False when the node did not
-    answer, so the loop asks again soon instead of in RETICULUM_ANNOUNCE_S."""
-    global announcing
+said = None   # the body last announced
+
+
+def announce_presence(changed_only: bool = False) -> bool:
+    """Ask the node what it is willing to say, then say exactly that — or nothing. With changed_only, say it only when
+    it differs from what was last said. False when the node did not answer, so the loop asks again soon instead of in
+    RETICULUM_ANNOUNCE_S."""
+    global announcing, said
     try:
         p = httpx.get(f"{API}/presence", timeout=5).json()
     except Exception as e:                                  # noqa: BLE001
@@ -164,15 +168,17 @@ def announce_presence() -> bool:
         return False
     if not p.get("enabled"):
         PRESENCE.set_default_app_data(None)                 # turned off: a node asking for our path gets no body either
-        announcing = False
+        announcing, said = False, None
         return True
     body = {k: p.get(k) for k in ("node", "cell", "res", "version", "kind", "id") if p.get(k) is not None}
     data = json.dumps(body, separators=(",", ":")).encode()
+    if changed_only and data == said:
+        return True
     # A node that joins the hub asks for paths, and the answer is an announce. Without this it carried no body, so the
     # newcomer heard nothing until our next half-hourly announce (seen through node #1's Funnel, 25 Nov 2026).
     PRESENCE.set_default_app_data(data)
     PRESENCE.announce(app_data=data)
-    announcing = True
+    announcing, said = True, data
     log.info("presence: announced %s", body)
     return True
 
@@ -319,6 +325,7 @@ class H(BaseHTTPRequestHandler):
 
 
 def announce_loop():
+    settle = 20
     while True:
         try:
             router.announce(me.hash)                        # the LXMF address, so a person can message it
@@ -328,6 +335,12 @@ def announce_loop():
                 if announce_presence():
                     break
                 time.sleep(30)
+            # Or it finds the old app, still answering until update recreates it, and we announced its version for half
+            # an hour (node #1, 25 Nov 2026). So for ten minutes after a start, ask every 30 s and say what changed.
+            for _ in range(settle):
+                time.sleep(30)
+                announce_presence(changed_only=True)
+            settle = 0
         except Exception as e:                              # noqa: BLE001 — one bad announce is not the end
             log.warning("announce failed: %s", e)
         time.sleep(ANNOUNCE_S)
