@@ -39,6 +39,7 @@ import RNS
 
 log = logging.getLogger("planetai.reticulum")
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(message)s")
+logging.getLogger("httpx").setLevel(logging.WARNING)       # a line for every ask of the node, once a minute, says nothing
 
 NODE = os.getenv("NODE_NAME", "node")
 API = os.getenv("NODE_API_URL", "http://app:8080")
@@ -325,7 +326,6 @@ class H(BaseHTTPRequestHandler):
 
 
 def announce_loop():
-    settle = 20
     while True:
         try:
             router.announce(me.hash)                        # the LXMF address, so a person can message it
@@ -335,15 +335,17 @@ def announce_loop():
                 if announce_presence():
                     break
                 time.sleep(30)
-            # Or it finds the old app, still answering until update recreates it, and we announced its version for half
-            # an hour (node #1, 25 Nov 2026). So for ten minutes after a start, ask every 30 s and say what changed.
-            for _ in range(settle):
-                time.sleep(30)
-                announce_presence(changed_only=True)
-            settle = 0
         except Exception as e:                              # noqa: BLE001 — one bad announce is not the end
             log.warning("announce failed: %s", e)
-        time.sleep(ANNOUNCE_S)
+        # Between announces, ask every minute and say what changed. An update can start this container while the old app
+        # still answers, or replace the app and leave this container running, and either way every node on the hub heard
+        # the old version for half an hour (node #1, 25 Nov 2026).
+        for _ in range(max(1, ANNOUNCE_S // 60)):
+            time.sleep(60)
+            try:
+                announce_presence(changed_only=True)
+            except Exception as e:                          # noqa: BLE001
+                log.warning("announce failed: %s", e)
 
 
 threading.Thread(target=announce_loop, daemon=True).start()

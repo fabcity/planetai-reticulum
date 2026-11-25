@@ -102,20 +102,19 @@ loop_block = lift("said = None", "\n\n" + WHO) + "\n\n" + lift("def announce_loo
 class Stop(BaseException): pass
 fake = lambda **kw: type("F", (), kw)
 def run_loop(answers):
-    """The real announce_presence and announce_loop against a node whose n-th answer to GET /presence is answers[n]
-    (None: not up yet; the last one repeats), until the loop's half-hour sleep. Returns the namespace, every announce
-    as (seconds since start, body), and every body a path answer was set to carry (None: nothing)."""
-    clock, asks, said, defaults = [0], [], [], []
+    """The real announce_presence and announce_loop for half an hour, against a node that answers GET /presence with
+    the body of the last (second, body) in answers whose second has come (None: not up yet). Returns the namespace,
+    every announce as (seconds since start, body), and every body a path answer was set to carry (None: nothing)."""
+    clock, said, defaults = [0], [], []
     def get(url, timeout):
-        a = answers[min(len(asks), len(answers) - 1)]
-        asks.append(url)
+        a = [b for t, b in answers if t <= clock[0]][-1]
         if a is None:
             raise ConnectionError("app not up yet")
         return type("R", (), {"json": lambda self: a})()
     def sleep(s):
-        if s == 1800:
-            raise Stop
         clock[0] += s
+        if clock[0] >= 1800:                                # the next full announce is the next half hour's
+            raise Stop
     ns = {"httpx": fake(get=staticmethod(get)), "time": fake(sleep=staticmethod(sleep)), "json": json,
           "API": "http://app", "ANNOUNCE_S": 1800, "announcing": False, "log": logging.getLogger("t"),
           "router": fake(announce=staticmethod(lambda h: None)), "me": fake(hash=b"x"),
@@ -131,25 +130,29 @@ def run_loop(answers):
 ME = {"enabled": True, "node": "dieznode", "cell": "838db5fffffffff", "res": 3, "id": "lfzfhebv76r45tfr", "lat": -8.8}
 SAY = {k: ME[k] for k in ("node", "cell", "res", "id")}
 OFF = {"enabled": False}
-ns, said, defaults = run_loop([None, None, ME])
+ns, said, defaults = run_loop([(0, None), (60, ME)])
 chk(f"a node not up yet is asked again soon (announced at {[t for t, _ in said]} s)", said and said[0][0] == 60)
 chk("and presence goes out once it answers, and once only while it says the same",
     len(said) == 1 and ns["announcing"] is True)
 chk("with the node's id, so a heard node can be matched to a listed one", said[0][1] == SAY)
 chk("and a node asking for its path hears the same body, not an empty announce", defaults == [SAY])
 
-# `planetai update` recreates this container and then the app, so the first ask can reach the old app: its version,
-# and before planetai-node #425 no id. That body went out and stayed for RETICULUM_ANNOUNCE_S (node #1, 25 Nov 2026).
+# `planetai update` can start this container while the old app still answers (its version, and before planetai-node
+# #425 no id), or replace the app and leave this container running. Either way that body went out and stayed for
+# RETICULUM_ANNOUNCE_S (node #1, 25 Nov 2026, both seen the same morning).
 OLD = {"enabled": True, "node": "dieznode", "cell": "838db5fffffffff", "res": 3, "version": "v0.92.0"}
 NEW = dict(ME, version="v0.93.0")
-ns, said, defaults = run_loop([OLD, NEW])
-chk(f"the new app's body goes out minutes after the old one's, not half an hour (said {said})",
-    [b for _, b in said] == [{k: OLD[k] for k in ("node", "cell", "res", "version")}, dict(SAY, version="v0.93.0")]
-    and said[1][0] <= 600)
-chk("and a path answer carries the newest body", defaults[-1] == said[-1][1])
-ns, said, defaults = run_loop([ME, OFF])
+SAY_OLD, SAY_NEW = {k: OLD[k] for k in ("node", "cell", "res", "version")}, dict(SAY, version="v0.93.0")
+ns, said, defaults = run_loop([(0, OLD), (1, NEW)])
+chk(f"the new app's body goes out a minute after the old one's, not half an hour (said {said})",
+    said == [(0, SAY_OLD), (60, SAY_NEW)])
+chk("and a path answer carries the newest body", defaults[-1] == SAY_NEW)
+ns, said, defaults = run_loop([(0, OLD), (1200, NEW)])
+chk(f"an app replaced twenty minutes into a run is said within a minute too (said at {[t for t, _ in said]} s)",
+    said == [(0, SAY_OLD), (1200, SAY_NEW)])
+ns, said, defaults = run_loop([(0, ME), (1, OFF)])
 chk("turned off, a path answer carries nothing either", defaults[-1] is None and ns["announcing"] is False and len(said) == 1)
-ns, said, defaults = run_loop([ME, OFF, ME])
+ns, said, defaults = run_loop([(0, ME), (1, OFF), (61, ME)])
 chk("and turned on again, the same body goes out again", [b for _, b in said] == [SAY, SAY] and defaults[-1] == SAY)
 
 # The receiving half keeps the id too (SPEC_hub §7 in planetai-node). The real handler runs with RNS faked.
