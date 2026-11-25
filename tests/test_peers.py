@@ -327,13 +327,16 @@ def handler(ns, method, path, body=None):
 code, got = handler(hb2, "GET", "/inbox")
 chk("GET /inbox lists what arrived, newest first", code == 200 and [r["from"] for r in got["inbox"]] == ["a2", "a1"])
 hb2["HELLO_WAIT_S"], hb2["alert_to"][:] = 1, ["aa11"]
+said_first = []
+hb2["router"], hb2["me"] = fake(announce=staticmethod(lambda h: said_first.append("announce"))), fake(hash=b"me")
 # the inbox's answer comes back as a message, through on_message, a moment after the hello goes out
-hb2["deliver"] = lambda to, text, title: threading.Timer(0.2, lambda: hb2["on_message"](
+hb2["deliver"] = lambda to, text, title: said_first.append("deliver") or threading.Timer(0.2, lambda: hb2["on_message"](
     msg(to, "received: a person reads it before it is listed"))).start() or text.startswith("hello {")
 code, got = handler(hb2, "POST", "/hello", {"inbox": " 1B4F 7640 ", "entry": entry})
 hb2["on_message"](msg("1b4f7640", "a late answer, after the wait"))
 chk("POST /hello sends the entry and returns the inbox's answer",
     code == 200 and got == {"sent": True, "answer": "received: a person reads it before it is listed"})
+chk("it announces this node first, so the inbox can check the hello's signature", said_first[:2] == ["announce", "deliver"])
 chk("and leaves who may act as it was, keeping no answer once it stops waiting",
     hb2["alert_to"] == ["aa11"] and not hb2["waiting"] and not hb2["answers"])
 hb2["deliver"] = lambda to, text, title: True

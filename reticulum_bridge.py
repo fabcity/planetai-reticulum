@@ -422,6 +422,9 @@ class H(BaseHTTPRequestHandler):
         t0 = time.time()
         waiting.add(to)
         try:
+            # the inbox checks the hello's signature against this node's identity, which it knows only from an announce;
+            # a node that just started may have announced before its hub was up. deliver's path request gives it time.
+            router.announce(me.hash)
             if not deliver(to, "hello " + json.dumps(e, separators=(",", ":")), "hello"):
                 return self._json(200, {"sent": False, "answer": None})
             for _ in range(int(HELLO_WAIT_S * 2)):
