@@ -15,6 +15,7 @@ import os
 import pathlib
 import tempfile
 import threading
+import time
 
 src = pathlib.Path(__file__).resolve().parent.parent.joinpath("reticulum_bridge.py").read_text()
 
@@ -99,12 +100,13 @@ WHO = "# ---------------------------------------------------------------- who ma
 block = lift("def announce_presence", "\n\n" + WHO) + "\n\n" + lift("def announce_loop", "\n\nthreading.Thread")
 
 class Stop(BaseException): pass
-asks, sleeps, said = [], [], []
+asks, sleeps, said, defaults = [], [], [], []
 def get(url, timeout):
     asks.append(url)
     if len(asks) < 3:
         raise ConnectionError("app not up yet")
-    return type("R", (), {"json": lambda self: {"enabled": True, "node": "dieznode", "cell": "838db5fffffffff", "res": 3}})()
+    return type("R", (), {"json": lambda self: {"enabled": True, "node": "dieznode", "cell": "838db5fffffffff", "res": 3,
+                                                "id": "lfzfhebv76r45tfr", "lat": -8.8}})()
 def sleep(s):
     sleeps.append(s)
     if s == 1800:
@@ -113,7 +115,8 @@ fake = lambda **kw: type("F", (), kw)
 ns = {"httpx": fake(get=staticmethod(get)), "time": fake(sleep=staticmethod(sleep)), "json": json,
       "API": "http://app", "ANNOUNCE_S": 1800, "announcing": False, "log": logging.getLogger("t"),
       "router": fake(announce=staticmethod(lambda h: None)), "me": fake(hash=b"x"),
-      "PRESENCE": fake(announce=staticmethod(lambda app_data: said.append(app_data)))}
+      "PRESENCE": fake(announce=staticmethod(lambda app_data: said.append(app_data)),
+                       set_default_app_data=staticmethod(lambda d: defaults.append(d)))}
 exec(compile(block, "bridge-announce", "exec"), ns)        # noqa: S102
 try:
     ns["announce_loop"]()
@@ -121,6 +124,49 @@ except Stop:
     pass
 chk(f"a node not up yet is asked again soon (slept {sleeps})", sleeps == [30, 30, 1800])
 chk("and presence goes out once it answers", len(said) == 1 and ns["announcing"] is True)
+chk("with the node's id, so a heard node can be matched to a listed one",
+    json.loads(said[0]) == {"node": "dieznode", "cell": "838db5fffffffff", "res": 3, "id": "lfzfhebv76r45tfr"})
+
+chk("and a node asking for its path hears the same body, not an empty announce", defaults == said)
+ns["httpx"] = fake(get=staticmethod(lambda url, timeout: type("R", (), {"json": lambda self: {"enabled": False}})()))
+ns["announce_presence"]()
+chk("turned off, a path answer carries nothing either", defaults[-1] is None and ns["announcing"] is False)
+
+# The receiving half keeps the id too (SPEC_hub §7 in planetai-node). The real handler runs with RNS faked.
+block = lift("class PresenceHandler", "\n\nRNS.Transport.register_announce_handler")
+ns = {"json": json, "time": time, "threading": threading, "log": logging.getLogger("t"), "heard": {},
+      "heard_lock": threading.Lock(), "HEARD_MAX": 200, "_save_heard": lambda: None,
+      "RNS": fake(hexrep=staticmethod(lambda b, delimit=True: b.hex())), "PRESENCE": fake(hash=b"\x00")}
+exec(compile(block, "bridge-presence", "exec"), ns)        # noqa: S102
+hp = ns["PresenceHandler"]()
+hp.received_announce(b"\xab\x12", None, b'{"node":"mahon1","cell":"831e5ffffffffff","res":3,"id":"k4xq2"}')
+hp.received_announce(b"\xcd\x34", None, b'{"node":"old-node","cell":"831e5ffffffffff","res":3}')
+chk("a heard node keeps its id", ns["heard"]["ab12"]["id"] == "k4xq2")
+chk("and one from an older node has none, so it is matched by name", ns["heard"]["cd34"]["id"] is None)
+
+# /health lists the interfaces the node opened and whether each is up, so a node that hears nobody can tell whether
+# its hub is down. A hub's server gives a count of the nodes on it, not one row each.
+block = lift("def interfaces()", "\n\nclass H(")
+class Server:
+    name, online, parent_interface = "TCP Server", True, None
+    @property
+    def clients(self): return 2
+Client = lambda n: fake(name=n, online=True, parent_interface=Server())
+Pipe = lambda up: type("PipeInterface", (), {"name": "Fab City hub", "online": up, "parent_interface": None})()
+for up in (True, False):
+    ns = {"RNS": fake(Transport=fake(interfaces=[Server(), Client("Client on TCP Server"), Pipe(up)]))}
+    exec(compile(block, "bridge-interfaces", "exec"), ns)  # noqa: S102
+    rows = ns["interfaces"]()
+    chk(f"/health says the hub is {'up' if up else 'down'}",
+        rows == [{"name": "TCP Server", "type": "Server", "online": True, "clients": 2},
+                 {"name": "Fab City hub", "type": "PipeInterface", "online": up}])
+
+# config.tpl carries the hub block commented, word for word what `planetai reticulum` writes when a household says yes
+tpl = pathlib.Path(__file__).resolve().parent.parent.joinpath("config.tpl").read_text()
+chk("config.tpl has the hub block, commented", "  # [[Fab City hub]]\n  #   type = PipeInterface\n" in tpl)
+# -servername only sends the name; without -verify_hostname any trusted certificate passes (CodeRabbit on #2)
+chk("and it checks that the certificate is the hub's, by name", "openssl s_client -quiet -verify_return_error -verify_hostname fabalabbali.tail71245c.ts.net -connect fabalabbali.tail71245c.ts.net:443 -servername fabalabbali.tail71245c.ts.net" in tpl)
+chk("transport stays off for a node that is not a hub", re.search(r"(?m)^  enable_transport = No\b", tpl) is not None)
 
 # /send goes to the addresses the node sends with the alert, read from its settings at that moment. The bridge's own
 # RETICULUM_ALERT_DESTINATIONS is read when the container is created, so an address saved in Set up never got an
@@ -213,5 +259,5 @@ ns4 = bridge(["aa11"])
 ns4["on_message"](msg("dd44", "act 11"))
 chk("the next alert saves it, and a restart keeps the address out", ns3["alert_to"] == [] and posts[-1]["alert_id"] == 10)
 
-print("peers survive a restart, presence listens, and only the node's own people act" if not fails else f"{fails} failed")
+print("peers survive a restart, presence listens, the hub shows, and only the node's own people act" if not fails else f"{fails} failed")
 raise SystemExit(1 if fails else 0)
