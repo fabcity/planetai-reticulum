@@ -231,7 +231,8 @@ fake_rns = fake(hexrep=staticmethod(lambda b, delimit=True: b.hex()), prettyhexr
 d = tempfile.mkdtemp()
 def bridge(dests):
     """A fresh container: the who-may-act block exec'd against DATA = d, as a restart would load it."""
-    ns = {"os": os, "re": re, "json": json, "DATA": d, "DESTS": dests, "log": logging.getLogger("t"), "API": "http://app",
+    ns = {"os": os, "re": re, "json": json, "time": time, "threading": threading, "DATA": d, "DESTS": dests,
+          "log": logging.getLogger("t"), "API": "http://app",
           "httpx": fake_httpx, "RNS": fake_rns, "reply": lambda h, text: replies.append((h.hex(), text))}
     exec(compile(act_block, "bridge-act", "exec"), ns)     # noqa: S102
     return ns
@@ -282,5 +283,64 @@ ns4 = bridge(["aa11"])
 ns4["on_message"](msg("dd44", "act 11"))
 chk("the next alert saves it, and a restart keeps the address out", ns3["alert_to"] == [] and posts[-1]["alert_id"] == 10)
 
-print("peers survive a restart, presence listens, the hub shows, and only the node's own people act" if not fails else f"{fails} failed")
+# hello: the programme's inbox (SPEC_hub §9 in planetai-node). An entry with only the fields `planetai hello` writes, from
+# a signed sender, is kept, one per sender and at most INBOX_MAX, and answered; anything else is not kept. Same block as
+# the act tests above, so the inbox lives in that DATA and a restart is a fresh exec.
+d = tempfile.mkdtemp()
+entry = {"name": "mahon1", "place": "Mahon, Menorca, ES", "cell": "8839a1b2c3fffff", "lat": 39.889, "lon": 4.265,
+         "scale": "community", "operator": "Lucas", "sources": ["smartcitizen"], "since": "2026-11", "parent": None,
+         "id": "cc5gqlek2e2rhfy6", "key": "0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc="}
+replies.clear()
+hb = bridge([])
+hb["on_message"](msg("ee55", "hello " + json.dumps(entry)))
+chk("a hello from a signed sender is kept", hb["inbox"].get("ee55", {}).get("entry") == entry)
+chk("and answered", replies[-1] == ("ee55", "received: a person reads it before it is listed"))
+hb["on_message"](msg("ee55", "hello " + json.dumps(dict(entry, place="Mahón"))))
+chk("one entry per sender, the newest", len(hb["inbox"]) == 1 and hb["inbox"]["ee55"]["entry"]["place"] == "Mahón")
+hb["on_message"](msg("ff66", "hello " + json.dumps(dict(entry, name="x", lat=1)), signed=False))
+chk("an unsigned hello is not kept, and not answered", "ff66" not in hb["inbox"] and replies[-1][0] == "ee55")
+n = len(replies)
+hb["on_message"](msg("ab77", "hello " + json.dumps(dict(entry, readings=[1, 2]))))
+hb["on_message"](msg("ab77", "hello {not json"))
+chk("a hello with a field planetai hello does not write is not kept, and told so once",
+    "ab77" not in hb["inbox"] and len(replies) == n + 1 and replies[-1] == ("ab77", "not kept: hello takes the entry planetai hello writes, and nothing else"))
+hb["on_message"](msg("cd88", "hello there"))
+chk("a greeting is not a hello", "cd88" not in hb["inbox"] and len(replies) == n + 1)
+hb2 = bridge([])
+chk("the inbox survives a restart", hb2["inbox"].get("ee55", {}).get("entry", {}).get("place") == "Mahón")
+hb2["INBOX_MAX"], t0 = 2, hb2["inbox"]["ee55"]["at"]
+for who, t in (("a1", 1), ("a2", 2)):
+    hb2["on_message"](msg(who, "hello " + json.dumps(dict(entry, name=who))))
+    hb2["inbox"][who]["at"] = t0 + t
+chk("at most INBOX_MAX, the oldest out first", sorted(hb2["inbox"]) == ["a1", "a2"])
+
+# GET /inbox lists them, newest first; POST /hello sends this node's entry and returns what the inbox said, and never
+# touches who may act (it is not /send)
+def handler(ns, method, path, body=None):
+    exec(compile("class H:\n" + src[src.index("    def do_GET(self):"):src.index("\n\n\ndef announce_loop")], "bridge-http", "exec"), ns)  # noqa: S102
+    h, out = ns["H"](), []
+    payload = json.dumps(body or {}).encode()
+    h.path, h.headers, h.rfile = path, {"Content-Length": str(len(payload))}, io.BytesIO(payload)
+    h._json = lambda code, obj: out.append((code, obj))
+    getattr(h, "do_" + method)()
+    return out[0]
+code, got = handler(hb2, "GET", "/inbox")
+chk("GET /inbox lists what arrived, newest first", code == 200 and [r["from"] for r in got["inbox"]] == ["a2", "a1"])
+hb2["HELLO_WAIT_S"], hb2["alert_to"][:] = 1, ["aa11"]
+# the inbox's answer comes back as a message, through on_message, a moment after the hello goes out
+hb2["deliver"] = lambda to, text, title: threading.Timer(0.2, lambda: hb2["on_message"](
+    msg(to, "received: a person reads it before it is listed"))).start() or text.startswith("hello {")
+code, got = handler(hb2, "POST", "/hello", {"inbox": " 1B4F 7640 ", "entry": entry})
+hb2["on_message"](msg("1b4f7640", "a late answer, after the wait"))
+chk("POST /hello sends the entry and returns the inbox's answer",
+    code == 200 and got == {"sent": True, "answer": "received: a person reads it before it is listed"})
+chk("and leaves who may act as it was, keeping no answer once it stops waiting",
+    hb2["alert_to"] == ["aa11"] and not hb2["waiting"] and not hb2["answers"])
+hb2["deliver"] = lambda to, text, title: True
+code, got = handler(hb2, "POST", "/hello", {"inbox": "1b4f", "entry": entry})
+chk("an inbox that does not answer in time is said so", got == {"sent": True, "answer": None})
+code, got = handler(hb2, "POST", "/hello", {"inbox": "1b4f", "entry": dict(entry, readings=[1])})
+chk("and an entry planetai hello would not write is not sent", code == 400)
+
+print("peers survive a restart, presence listens, the hub shows, the inbox keeps hellos, and only the node's own people act" if not fails else f"{fails} failed")
 raise SystemExit(1 if fails else 0)
