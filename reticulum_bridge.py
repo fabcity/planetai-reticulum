@@ -163,10 +163,15 @@ def announce_presence() -> bool:
         log.debug("presence: the node did not answer (%s)", e)
         return False
     if not p.get("enabled"):
+        PRESENCE.set_default_app_data(None)                 # turned off: a node asking for our path gets no body either
         announcing = False
         return True
     body = {k: p.get(k) for k in ("node", "cell", "res", "version", "kind", "id") if p.get(k) is not None}
-    PRESENCE.announce(app_data=json.dumps(body, separators=(",", ":")).encode())
+    data = json.dumps(body, separators=(",", ":")).encode()
+    # A node that joins the hub asks for paths, and the answer is an announce. Without this it carried no body, so the
+    # newcomer heard nothing until our next half-hourly announce (seen through node #1's Funnel, 25 Nov 2026).
+    PRESENCE.set_default_app_data(data)
+    PRESENCE.announce(app_data=data)
     announcing = True
     log.info("presence: announced %s", body)
     return True

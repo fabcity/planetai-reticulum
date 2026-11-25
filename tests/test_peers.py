@@ -100,7 +100,7 @@ WHO = "# ---------------------------------------------------------------- who ma
 block = lift("def announce_presence", "\n\n" + WHO) + "\n\n" + lift("def announce_loop", "\n\nthreading.Thread")
 
 class Stop(BaseException): pass
-asks, sleeps, said = [], [], []
+asks, sleeps, said, defaults = [], [], [], []
 def get(url, timeout):
     asks.append(url)
     if len(asks) < 3:
@@ -115,7 +115,8 @@ fake = lambda **kw: type("F", (), kw)
 ns = {"httpx": fake(get=staticmethod(get)), "time": fake(sleep=staticmethod(sleep)), "json": json,
       "API": "http://app", "ANNOUNCE_S": 1800, "announcing": False, "log": logging.getLogger("t"),
       "router": fake(announce=staticmethod(lambda h: None)), "me": fake(hash=b"x"),
-      "PRESENCE": fake(announce=staticmethod(lambda app_data: said.append(app_data)))}
+      "PRESENCE": fake(announce=staticmethod(lambda app_data: said.append(app_data)),
+                       set_default_app_data=staticmethod(lambda d: defaults.append(d)))}
 exec(compile(block, "bridge-announce", "exec"), ns)        # noqa: S102
 try:
     ns["announce_loop"]()
@@ -125,6 +126,11 @@ chk(f"a node not up yet is asked again soon (slept {sleeps})", sleeps == [30, 30
 chk("and presence goes out once it answers", len(said) == 1 and ns["announcing"] is True)
 chk("with the node's id, so a heard node can be matched to a listed one",
     json.loads(said[0]) == {"node": "dieznode", "cell": "838db5fffffffff", "res": 3, "id": "lfzfhebv76r45tfr"})
+
+chk("and a node asking for its path hears the same body, not an empty announce", defaults == said)
+ns["httpx"] = fake(get=staticmethod(lambda url, timeout: type("R", (), {"json": lambda self: {"enabled": False}})()))
+ns["announce_presence"]()
+chk("turned off, a path answer carries nothing either", defaults[-1] is None and ns["announcing"] is False)
 
 # The receiving half keeps the id too (SPEC_hub §7 in planetai-node). The real handler runs with RNS faked.
 block = lift("class PresenceHandler", "\n\nRNS.Transport.register_announce_handler")
