@@ -39,6 +39,7 @@ import RNS
 
 log = logging.getLogger("planetai.reticulum")
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(message)s")
+logging.getLogger("httpx").setLevel(logging.WARNING)       # a line for every ask of the node, once a minute, says nothing
 
 NODE = os.getenv("NODE_NAME", "node")
 API = os.getenv("NODE_API_URL", "http://app:8080")
@@ -153,10 +154,14 @@ class PresenceHandler:
 RNS.Transport.register_announce_handler(PresenceHandler())
 
 
-def announce_presence() -> bool:
-    """Ask the node what it is willing to say, then say exactly that — or nothing. False when the node did not
-    answer, so the loop asks again soon instead of in RETICULUM_ANNOUNCE_S."""
-    global announcing
+said = None   # the body last announced
+
+
+def announce_presence(changed_only: bool = False) -> bool:
+    """Ask the node what it is willing to say, then say exactly that — or nothing. With changed_only, say it only when
+    it differs from what was last said. False when the node did not answer, so the loop asks again soon instead of in
+    RETICULUM_ANNOUNCE_S."""
+    global announcing, said
     try:
         p = httpx.get(f"{API}/presence", timeout=5).json()
     except Exception as e:                                  # noqa: BLE001
@@ -164,15 +169,17 @@ def announce_presence() -> bool:
         return False
     if not p.get("enabled"):
         PRESENCE.set_default_app_data(None)                 # turned off: a node asking for our path gets no body either
-        announcing = False
+        announcing, said = False, None
         return True
     body = {k: p.get(k) for k in ("node", "cell", "res", "version", "kind", "id") if p.get(k) is not None}
     data = json.dumps(body, separators=(",", ":")).encode()
+    if changed_only and data == said:
+        return True
     # A node that joins the hub asks for paths, and the answer is an announce. Without this it carried no body, so the
     # newcomer heard nothing until our next half-hourly announce (seen through node #1's Funnel, 25 Nov 2026).
     PRESENCE.set_default_app_data(data)
     PRESENCE.announce(app_data=data)
-    announcing = True
+    announcing, said = True, data
     log.info("presence: announced %s", body)
     return True
 
@@ -330,7 +337,15 @@ def announce_loop():
                 time.sleep(30)
         except Exception as e:                              # noqa: BLE001 — one bad announce is not the end
             log.warning("announce failed: %s", e)
-        time.sleep(ANNOUNCE_S)
+        # Between announces, ask every minute and say what changed. An update can start this container while the old app
+        # still answers, or replace the app and leave this container running, and either way every node on the hub heard
+        # the old version for half an hour (node #1, 25 Nov 2026).
+        for _ in range(max(1, ANNOUNCE_S // 60)):
+            time.sleep(60)
+            try:
+                announce_presence(changed_only=True)
+            except Exception as e:                          # noqa: BLE001
+                log.warning("announce failed: %s", e)
 
 
 threading.Thread(target=announce_loop, daemon=True).start()
