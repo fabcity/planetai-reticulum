@@ -13,7 +13,9 @@ What it gives the node:
   · an outbox: POST /send {"text": ...} delivers the text to every LXMF destination in RETICULUM_ALERT_DESTINATIONS
 
 Transport is whatever config/reticulum/config enables: the TCP server always (reachable over the LAN or the
-tailnet); an RNode LoRa radio when its block is uncommented and the device is passed into the container.
+tailnet); a Fab City hub when `planetai reticulum` writes its block, so nodes hear each other with nothing open on
+their routers; an RNode LoRa radio when its block is uncommented and the device is passed into the container. A hub is
+a node whose config says `enable_transport = Yes` and that the internet can reach (README, "Running a hub").
 
 Identity and LXMF storage persist in /data. Deleting that volume gives the node a new address.
 rns and lxmf are pinned in the Dockerfile. Their licence adds two conditions to MIT and is not an open licence;
@@ -138,7 +140,8 @@ class PresenceHandler:
                         "cell": str(body.get("cell") or "")[:20] or None,
                         "res": int(body["res"]) if isinstance(body.get("res"), int) else None,
                         "version": str(body.get("version") or "")[:24] or None,
-                        "kind": str(body.get("kind") or "")[:24] or None})
+                        "kind": str(body.get("kind") or "")[:24] or None,
+                        "id": str(body.get("id") or "")[:40] or None})   # the node ID, to match a listed node
             heard[h] = row
             if len(heard) > HEARD_MAX:                      # a busy network must not fill this container
                 for k, _ in sorted(heard.items(), key=lambda kv: kv[1]["last"])[:len(heard) - HEARD_MAX]:
@@ -162,7 +165,7 @@ def announce_presence() -> bool:
     if not p.get("enabled"):
         announcing = False
         return True
-    body = {k: p.get(k) for k in ("node", "cell", "res", "version", "kind") if p.get(k) is not None}
+    body = {k: p.get(k) for k in ("node", "cell", "res", "version", "kind", "id") if p.get(k) is not None}
     PRESENCE.announce(app_data=json.dumps(body, separators=(",", ":")).encode())
     announcing = True
     log.info("presence: announced %s", body)
@@ -264,6 +267,16 @@ def reply(source_hash: bytes, text: str) -> None:
     deliver(RNS.hexrep(source_hash, delimit=False), text)
 
 
+def interfaces() -> list:
+    """The interfaces this node opened, from its config, and whether each is up: a node that hears nobody can tell
+    whether its hub is down. A pipe is up while its command runs, and `openssl s_client -quiet` exits when the
+    connection fails. A client that dialled in has its own interface under the server; on a hub that is one per
+    node, so the server gives a count instead."""
+    return [{"name": i.name, "type": type(i).__name__, "online": bool(i.online),
+             **({"clients": i.clients} if hasattr(i, "clients") else {})}
+            for i in RNS.Transport.interfaces if getattr(i, "parent_interface", None) is None]
+
+
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def _json(self, code, obj):
@@ -273,7 +286,8 @@ class H(BaseHTTPRequestHandler):
         if self.path == "/health":
             self._json(200, {"ok": True, "address": RNS.hexrep(me.hash, delimit=False),
                              "destinations": len(DESTS), "announcing": announcing,
-                             "presence": RNS.hexrep(PRESENCE.hash, delimit=False)})
+                             "presence": RNS.hexrep(PRESENCE.hash, delimit=False),
+                             "transport": RNS.Reticulum.transport_enabled(), "interfaces": interfaces()})
         elif self.path == "/peers":
             with heard_lock:
                 rows = sorted(heard.values(), key=lambda r: -r["last"])

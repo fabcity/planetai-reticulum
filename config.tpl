@@ -2,10 +2,13 @@
 # and never over a copy you have edited.
 # Interfaces:
 #   TCP server: Sideband, NomadNet or another node connects here over the LAN or the tailnet. Always on.
+#   Fab City hub: dials the hub so this node hears other nodes, with nothing open on your router. Others on the hub
+#               see this node's name and LXMF address. `planetai reticulum` asks, and writes the block below
+#               uncommented when you say yes. Tailscale Funnel carries it, which takes only TLS, so openssl wraps it.
 #   RNode:      a LoRa radio on USB. Commented out: needs the device passed into the container (Linux only;
 #               macOS Docker cannot see USB serial) and the frequency for your region.
 [reticulum]
-  enable_transport = No
+  enable_transport = No          # Yes only on a hub: it passes other nodes' announces and messages on
   share_instance = Yes
   shared_instance_port = 37428
   instance_control_port = 37429
@@ -20,6 +23,12 @@
     enabled = yes
     listen_ip = 0.0.0.0
     listen_port = 4242
+
+  # [[Fab City hub]]
+  #   type = PipeInterface
+  #   enabled = yes
+  #   command = openssl s_client -quiet -verify_return_error -connect fabalabbali.tail71245c.ts.net:443 -servername fabalabbali.tail71245c.ts.net
+  #   respawn_delay = 15
 
   # [[RNode LoRa]]
   #   type = RNodeInterface

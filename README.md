@@ -36,6 +36,39 @@ The node downloads this repository at the commit its release pins (`RETICULUM_RE
 image on your machine and starts it. `planetai update` fetches it again whenever the pin moves. The identity lives in
 the node's `reticulum` volume, so a rebuild keeps the address. Deleting the volume gives the node a new one.
 
+## Running a hub
+
+A hub is a node that other nodes dial, so they hear each other with nothing open on their own routers. Node #1 in
+Bali is the first one, reached through Tailscale Funnel at `fabalabbali.tail71245c.ts.net:443`. `planetai reticulum`
+on any node asks whether to dial it, and writes the `[[Fab City hub]]` block of `config.tpl` when the answer is yes.
+
+To make a node a hub:
+
+1. Turn transport on in its own `config/reticulum/config`, then `docker compose restart reticulum` (the bridge reads
+   the file when it starts):
+
+   ```
+   [reticulum]
+     enable_transport = Yes
+   ```
+
+2. Let the internet reach its port 4242. Through Tailscale Funnel, on a machine the tailnet policy grants `funnel`:
+
+   ```bash
+   sudo tailscale funnel --bg --tls-terminated-tcp=443 tcp://localhost:4242
+   ```
+
+   Funnel takes only TLS, so nodes dial it through `openssl s_client` in a `PipeInterface`, as the block in
+   `config.tpl` does. Without Funnel, forward TCP 4242 on the router, or run a small relay with a fixed address that
+   does only `socat TCP-LISTEN:4242,fork,reuseaddr TCP:<the node's tailnet name>:4242`. Nodes then dial it with a
+   plain `TCPClientInterface`.
+
+3. Check `curl localhost:4243/health`: `transport` is `true`, and `TCP Server` under `interfaces` counts the nodes
+   connected (`clients`). On a node that dials a hub, `Fab City hub` says whether it is up.
+
+A hub keeps what Reticulum needs to route, paths and known identities, and nothing more. Each node on it decides what
+it says: its name and LXMF address always, its rough map cell only with presence on.
+
 ## Changing it
 
 ```bash
