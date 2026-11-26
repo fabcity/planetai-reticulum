@@ -357,10 +357,12 @@ def on_message(message):
         r = httpx.post(f"{API}/actions", json=body, headers={"Authorization": f"Bearer {os.getenv('ACT_TOKEN', '')}"},
                        timeout=10)
     except Exception as e:  # noqa: BLE001
+        # A timeout can come after the node wrote the row, so this cannot say "not recorded". A second answer is a
+        # second row, and ρ takes the first, so sending it again does no harm.
         log.warning("could not record the answer: %s", e)
-        reply(message.source_hash, "not recorded: the node did not answer. Send it again in a while")
+        reply(message.source_hash, "the node did not answer, so this may not be recorded. Sending it again does no harm")
         return
-    if r.status_code >= 400:
+    if not 200 <= r.status_code < 300:
         # The person who answered is told why, in the node's own words: no such alert, a decision first. A token the
         # node refuses is the bridge's to fix, not theirs.
         try:

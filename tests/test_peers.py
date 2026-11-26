@@ -316,7 +316,13 @@ Resp.status_code, Resp.body = 200, {}
 def down(url, json, headers, timeout): raise OSError("connection refused")
 na["httpx"] = fake(post=staticmethod(down))
 got, said = answer("done 6")
-chk("a node that does not answer is said so", said == "not recorded: the node did not answer. Send it again in a while")
+chk("a node that does not answer is said so, without claiming nothing was written",
+    said == "the node did not answer, so this may not be recorded. Sending it again does no harm")
+Resp.status_code = 302
+na["httpx"] = fake_httpx
+got, said = answer("done 6")
+chk("only a 2xx is recorded", said.startswith("not recorded: the node answered 302"))
+Resp.status_code = 200
 na["httpx"] = fake_httpx
 k = len(replies)
 got, said = answer("done 3x")
