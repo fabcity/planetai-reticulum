@@ -7,8 +7,11 @@ internet in between.
 It runs in its own container, beside the node, and does five things:
 
 - announces the node's LXMF address
-- turns a message like `act 12 closed the windows` into an action on alert 12, the same as a Telegram reply. It
-  takes one only from an address the node sends its alerts to, so a stranger on a shared network cannot close them
+- turns an answer to an alert into an action on the node, the same as the buttons under a Telegram message. A
+  private node ends each alert it sends with the answers it takes: `done 12` or `not now 12` for an alert, and
+  `done e7`, `not now e7` or `doesn't fit e7` for an event, in the node's language. `act 12` still works, and words
+  after the number are the note. When the node refuses one, the reply says why. It takes answers only from an
+  address the node sends its alerts to, so a stranger on a shared network cannot close them
 - delivers the node's alerts to the LXMF addresses the node sends with each one (Set up › Sharing on the node).
   A node too old to send them gets the bridge's own `RETICULUM_ALERT_DESTINATIONS` instead
 - if the household turns presence on, announces the node's name and a coarse map cell, and keeps a list of the

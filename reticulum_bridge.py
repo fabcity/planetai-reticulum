@@ -7,9 +7,11 @@ What it gives the node:
     cell is rounded to whatever RETICULUM_PRESENCE_RES says (default 3, about sixty kilometres), and
     the distance between two nodes is the distance between two cell centres. Off until a household
     sets RETICULUM_PRESENCE=1; the node decides, this container only asks and obeys.
-  · an inbox: a message whose text is  `act <alert id> [note]`  becomes POST /actions on the node — closing the
-    loop over a medium that works with no internet, exactly as a Telegram reply or `planetai act` would. Only from an
-    address the node sends its alerts to: anyone else gets one reply saying so, and nothing is written
+  · an inbox: an answer to an alert becomes POST /actions on the node — closing the loop over a medium that works with
+    no internet, as the buttons under a Telegram message do. The node ends each alert it sends here with the answers it
+    takes: `done 45` or `not now 45` for an alert, `done e7`, `not now e7` or `doesn't fit e7` for an event, in the
+    node's language, and `act 45` still works. Words after the number are the note. Only from an address the node
+    sends its alerts to: anyone else gets one reply saying so, and nothing is written
   · an outbox: POST /send {"text": ...} delivers the text to every LXMF destination in RETICULUM_ALERT_DESTINATIONS
   · hello: on the programme's inbox, a message `hello <entry as JSON>` asking to be listed is kept for a person to read
     (GET /inbox); on any node, POST /hello sends this node's entry to the inbox and returns what the inbox answered
@@ -48,7 +50,7 @@ API = os.getenv("NODE_API_URL", "http://app:8080")
 DATA = os.getenv("RETICULUM_DATA", "/data")
 DESTS = [d.strip().lower() for d in os.getenv("RETICULUM_ALERT_DESTINATIONS", "").split(",") if d.strip()]
 ANNOUNCE_S = int(os.getenv("RETICULUM_ANNOUNCE_S", "1800"))
-ACT = re.compile(r"^\s*act\s+(\d+)\s*(.*)$", re.I)
+ACT = re.compile(r"^\s*(act|done|not\s+now|doesn'?t\s+fit|selesai|nanti\s+dulu|tidak\s+cocok|hecho|ahora\s+no|no\s+encaja)\s+(e?)(\d+)\b\s*(.*)$", re.I | re.S)
 
 os.makedirs(DATA, exist_ok=True)
 # RNS writes its own storage under configdir, and the config is mounted read-only (the container crash-looped on
@@ -195,6 +197,14 @@ def announce_presence(changed_only: bool = False) -> bool:
 # restart between two alerts does not forget it.
 ALERT_TO_FILE = os.path.join(DATA, "alert_to.json")
 
+# The answers, as the node words them under an alert: the three buttons of an event (planetai-node app/actions.py
+# BUTTONS, in English, Indonesian and Spanish) and the older `act`. An alert takes done or not now, an event all three.
+# ponytail: a copy of the node's words; when BUTTONS changes, this changes with it.
+STAGE = {"act": "acted", "done": "acted", "selesai": "acted", "hecho": "acted",
+         "not now": "acknowledged", "nanti dulu": "acknowledged", "ahora no": "acknowledged",
+         "doesnt fit": "dismissed", "tidak cocok": "dismissed", "no encaja": "dismissed"}
+SAID = {"acted": "you acted on", "acknowledged": "not now, for", "dismissed": "doesn't fit, for"}
+
 
 def _load_alert_to() -> list:
     try:
@@ -313,7 +323,7 @@ def on_message(message):
     text = (message.content or b"").decode("utf-8", "ignore").strip()
     src = RNS.prettyhexrep(message.source_hash)
     log.info("inbox from %s: %s", src, text[:120])
-    m = ACT.match(text)
+    m = ACT.match(text.replace("\u2019", "'"))     # a phone keyboard types doesn’t with a curly apostrophe
     if not m:
         who, h = RNS.hexrep(message.source_hash, delimit=False), HELLO.match(text)
         if h:
@@ -324,25 +334,45 @@ def on_message(message):
     # LXMF hands over messages whose signature failed, or whose sender it has never heard, so source_hash is only a
     # claim until the signature checks out. No reply: a forger needs none, and an unknown sender cannot get one.
     if not message.signature_validated:
-        log.info("act from %s refused: signature not validated (%s)", src, message.unverified_reason)
+        log.info("answer from %s refused: signature not validated (%s)", src, message.unverified_reason)
         return
     who = RNS.hexrep(message.source_hash, delimit=False)
     if who not in DESTS and who not in alert_to:
-        log.info("act from %s refused: not an address this node sends alerts to", src)
+        log.info("answer from %s refused: not an address this node sends alerts to", src)
         if who not in told:
             told.add(who)
             reply(message.source_hash, "this node takes act only from the addresses it sends alerts to")
         return
-    alert_id, note = int(m.group(1)), (m.group(2).strip() or "acted (via reticulum)")
+    word = " ".join(m.group(1).lower().replace("'", "").split())
+    stage, event, n = STAGE[word], bool(m.group(2)), int(m.group(3))
+    ref = f"e{n}" if event else f"#{n}"
+    if stage == "dismissed" and not event:
+        reply(message.source_hash, "not recorded: an alert takes done or not now. Doesn't fit is for an event, e<number>")
+        return
+    body = {"event_id" if event else "alert_id": n, "stage": stage, "actor": f"lxmf:{src}",
+            "note": m.group(4).strip() or f"{word} (via reticulum)"}
     try:
         # ACT_TOKEN because this is another container, so the API sees a peer that is not this machine: /actions is
         # open on loopback only. The node's docker-compose.yml passes it in, one of the eight variables this reads.
-        httpx.post(f"{API}/actions", json={"alert_id": alert_id, "stage": "acted", "actor": f"lxmf:{src}", "note": note},
-                   headers={"Authorization": f"Bearer {os.getenv('ACT_TOKEN', '')}"}, timeout=10).raise_for_status()
-        reply(message.source_hash, f"recorded: you acted on #{alert_id}")
+        r = httpx.post(f"{API}/actions", json=body, headers={"Authorization": f"Bearer {os.getenv('ACT_TOKEN', '')}"},
+                       timeout=10)
     except Exception as e:  # noqa: BLE001
-        log.warning("could not record action: %s", e)
-
+        log.warning("could not record the answer: %s", e)
+        reply(message.source_hash, "not recorded: the node did not answer. Send it again in a while")
+        return
+    if r.status_code >= 400:
+        # The person who answered is told why, in the node's own words: no such alert, a decision first. A token the
+        # node refuses is the bridge's to fix, not theirs.
+        try:
+            why = r.json().get("detail") or f"the node answered {r.status_code}"
+        except Exception:  # noqa: BLE001
+            why = f"the node answered {r.status_code}"
+        if r.status_code in (401, 403):
+            why = "the node refused the bridge's token. Run planetai reticulum on the node"
+        log.warning("answer %s %s refused: %s %s", word, ref, r.status_code, why)
+        reply(message.source_hash, f"not recorded: {why}")
+        return
+    reply(message.source_hash, f"recorded: {SAID[stage]} {ref}")
 
 router.register_delivery_callback(on_message)
 
