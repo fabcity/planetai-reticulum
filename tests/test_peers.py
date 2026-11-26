@@ -225,7 +225,8 @@ assert WHO in src, "reticulum_bridge.py has no who-may-act section: any sender o
 act_block = src[src.index("ACT = re.compile"):].split("\n", 1)[0] + "\n\n" + lift(WHO, "\n\nrouter.register_delivery_callback")
 posts, replies = [], []
 class Resp:
-    def raise_for_status(self): pass
+    status_code, body = 200, {}
+    def json(self): return self.body
 fake_httpx = fake(post=staticmethod(lambda url, json, headers, timeout: posts.append(json) or Resp()))
 fake_rns = fake(hexrep=staticmethod(lambda b, delimit=True: b.hex()), prettyhexrep=staticmethod(lambda b: f"<{b.hex()}>"))
 d = tempfile.mkdtemp()
@@ -282,6 +283,50 @@ post_send(ns3, {"to": []})
 ns4 = bridge(["aa11"])
 ns4["on_message"](msg("dd44", "act 11"))
 chk("the next alert saves it, and a restart keeps the address out", ns3["alert_to"] == [] and posts[-1]["alert_id"] == 10)
+
+# The answers the node puts under an alert (planetai-node app/channels.py): done or not now for an alert, and for an event
+# (e<number>) doesn't fit too, in the node's three languages, with `act` as before. An event is answered as an event.
+na = bridge(["aa11"])
+replies.clear()
+def answer(text):
+    n = len(posts)
+    na["on_message"](msg("aa11", text))
+    return posts[n:], replies[-1][1] if replies else None
+got, said = answer("done e7 opened the windows")
+chk("done e7 answers event 7, with the words after it as the note",
+    got == [{"event_id": 7, "stage": "acted", "actor": "lxmf:<aa11>", "note": "opened the windows"}] and said == "recorded: you acted on e7")
+got, said = answer("Not now 3")
+chk("not now 3 is a later on alert 3", [(p["alert_id"], p["stage"]) for p in got] == [(3, "acknowledged")] and said == "recorded: not now, for #3")
+got, said = answer("doesn\u2019t fit e8")
+chk("doesn't fit typed with a phone's curly apostrophe dismisses event 8",
+    [(p["event_id"], p["stage"]) for p in got] == [(8, "dismissed")] and said == "recorded: doesn't fit, for e8")
+got, said = answer("tidak  cocok e9")
+chk("and in Indonesian", [(p["event_id"], p["stage"]) for p in got] == [(9, "dismissed")])
+got, said = answer("hecho 4")
+chk("and in Spanish", [(p["alert_id"], p["stage"]) for p in got] == [(4, "acted")] and said == "recorded: you acted on #4")
+got, said = answer("doesn't fit 3")
+chk("doesn't fit on an alert writes nothing, and says what an alert takes", got == [] and said.startswith("not recorded: an alert takes"))
+Resp.status_code, Resp.body = 404, {"detail": "no such alert"}
+got, said = answer("done 99")
+chk("a refusal is passed on in the node's words", said == "not recorded: no such alert")
+Resp.status_code, Resp.body = 401, {"detail": "closing a loop from off this machine needs Authorization: Bearer <ACT_TOKEN>"}
+got, said = answer("done 5")
+chk("a refused token says what to run on the node", said == "not recorded: the node refused the bridge's token. Run planetai reticulum on the node")
+Resp.status_code, Resp.body = 200, {}
+def down(url, json, headers, timeout): raise OSError("connection refused")
+na["httpx"] = fake(post=staticmethod(down))
+got, said = answer("done 6")
+chk("a node that does not answer is said so, without claiming nothing was written",
+    said == "the node did not answer, so this may not be recorded. Sending it again does no harm")
+Resp.status_code = 302
+na["httpx"] = fake_httpx
+got, said = answer("done 6")
+chk("only a 2xx is recorded", said.startswith("not recorded: the node answered 302"))
+Resp.status_code = 200
+na["httpx"] = fake_httpx
+k = len(replies)
+got, said = answer("done 3x")
+chk("a number run into a word is not an answer, and gets no reply", got == [] and len(replies) == k)
 
 # hello: the programme's inbox (SPEC_hub §9 in planetai-node). An entry with only the fields `planetai hello` writes, from
 # a signed sender, is kept, one per sender and at most INBOX_MAX, and answered; anything else is not kept. Same block as
